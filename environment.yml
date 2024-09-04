@@ -1,0 +1,22 @@
+name: e3nn_density
+channels:
+  - pytorch
+  - nvidia
+  - pyg
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - numpy<2.0
+  - pytorch
+  - pytorch-cuda=12.1
+  - pyg
+  - pytorch-cluster
+  - pytorch-scatter
+  - e3nn
+  - wandb
+  - plotly
+  - gau2grid
+  - pip:
+    - periodictable
