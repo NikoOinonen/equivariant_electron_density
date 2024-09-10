@@ -8,14 +8,14 @@ channels:
 dependencies:
   - python=3.11
   - pip
-  - numpy<2.0 # Numpy 2.0 currently not compatible with wandb
+  - numpy<2.0 # Pytorch import gives error with numpy>=2
   - pytorch
   - pytorch-cuda=12.1
   - pyg
   - pytorch-cluster # not used directly here, ...
   - pytorch-scatter # ...but the model in e3nn requires these
   - e3nn
-  - wandb
+  - tensorboard
   - plotly
   - cmake # for building gau2grid
   - pip:

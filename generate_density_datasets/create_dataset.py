@@ -193,8 +193,8 @@ def get_dataset(data_dir, xyzs_dir):
 
         # HACKY: MANUAL OVERRIDE OF RS_OUT_MAX
         # set manual Rs_out_max (comment out if desired)
-        # Rs_out_max=[(14, 0), (5, 1), (5, 2), (2, 3), (1, 4)]
-        # print("Using manual Rs_out_max:", Rs_out_max)
+        Rs_out_max = [(19, 0), (5, 1), (5, 2), (3, 3), (1, 4)]
+        print("Using manual Rs_out_max:", Rs_out_max)
 
         ## now construct coefficient, exponent and norm arrays
         ## from Rs_out_max
