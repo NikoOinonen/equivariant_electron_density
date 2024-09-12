@@ -134,3 +134,6 @@ dmypy.json
 # psi4
 *timer.dat
 
+*.pickle
+training/runs
+.vscode
