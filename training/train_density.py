@@ -42,7 +42,8 @@ def main():
     parser.add_argument("--train_split", type=int)
     parser.add_argument("--test_split", type=int)
     parser.add_argument("--epochs", type=int, default=300)
-    parser.add_argument("--qm", type=str, default="pbe0")
+    parser.add_argument("--continue_run", type=str)
+    parser.add_argument("--run_comment", type=str, default="")
     parser.add_argument("--ldep", type=bool, default=False)
     args = parser.parse_args()
 
@@ -62,6 +63,7 @@ def main():
     train_split = args.train_split
     test_split = args.test_split
     data_file = args.dataset
+
     lr = 1e-2
     density_spacing = 0.25
     save_interval = 1
@@ -118,27 +120,47 @@ def main():
     test_loader = torch_geometric.data.DataLoader(test_dataset[:test_split], batch_size=batch_size, shuffle=True)
 
     model = Network(**model_kwargs)
+    model.to(device)
 
     optim = torch.optim.Adam(model.parameters(), lr=lr)
     optim.zero_grad()
 
-    model.to(device)
+    if args.continue_run:
 
-    model_kwargs["train_dataset"] = data_file
-    model_kwargs["train_dataset_size"] = train_split
-    model_kwargs["lr"] = lr
-    model_kwargs["density_spacing"] = density_spacing
+        run_dir = Path(args.continue_run)
+        if not run_dir.exists():
+            print(f"No existing run directory at {run_dir}")
+            sys.exit(1)
 
-    writer = SummaryWriter()
-    run_dir = Path(writer.get_logdir())
-    print(run_dir)
+        writer = SummaryWriter(log_dir=run_dir)
 
-    i_batch = 1
+        # Load weights
+        weights_paths = list(run_dir.glob("model_weights_epoch_*.pt"))
+        if not weights_paths:
+            print(f"No weights found in {run_dir}.")
+            sys.exit(1)
+        weights_paths = sorted(weights_paths, key=lambda p: int(p.name.split("_")[-1].split(".")[0]))
+        weights_path = weights_paths[-1]
+        state = torch.load(weights_path)
+        model.load_state_dict(state)
+        print(f"Continuing training using weights from {weights_path}")
+
+        epoch_start = int(weights_path.name.split("_")[-1].split(".")[0])
+        i_batch = epoch_start * len(train_loader)
+
+    else:
+        writer = SummaryWriter(comment=f"_{args.run_comment}")
+        run_dir = Path(writer.get_logdir())
+        epoch_start = 0
+        i_batch = 1
+
+    print(f"Saving log to {run_dir}")
+
     loss_cum = 0.0
     loss_perchannel_cum = np.zeros(len(Rs))
     mae_cum = 0.0
     mue_cum = 0.0
-    for epoch in range(num_epochs):
+    for epoch in range(epoch_start, num_epochs):
 
         for step, data in enumerate(train_loader):
 
@@ -229,7 +251,9 @@ def main():
                 eps_cum += ep
 
         if epoch % save_interval == 0:
-            torch.save(model.state_dict(), run_dir / f"model_weights_epoch_{epoch + 1}.pt")
+            save_path = run_dir / f"model_weights_epoch_{epoch + 1}.pt"
+            torch.save(model.state_dict(), save_path)
+            print(f"Saved model weights on epoch {epoch + 1} to {save_path}.")
 
         # eps per l and loss per l hard coded for def2 below
         writer.add_scalar("Loss/Test", float(test_loss_cum.item()) / len(test_loader), i_batch)
