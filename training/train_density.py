@@ -1,6 +1,8 @@
 import argparse
 import os
+import pickle
 import random
+import subprocess
 import sys
 from pathlib import Path
 
@@ -52,17 +54,16 @@ def main():
 
     torch.set_default_dtype(torch.float32)
 
-    test_dataset = args.testset
-    num_epochs = args.epochs
-    ldep_bool = args.ldep
-
     # def2 basis set max irreps
     # WARNING. this is currently hard-coded for def2_universal
     Rs = [(19, 0), (5, 1), (5, 2), (3, 3), (1, 4)]
 
     train_split = args.train_split
     test_split = args.test_split
-    data_file = args.dataset
+    train_data_path = Path(args.dataset)
+    test_data_path = Path(args.testset)
+    num_epochs = args.epochs
+    ldep_bool = args.ldep
 
     lr = 1e-2
     density_spacing = 0.25
@@ -99,15 +100,15 @@ def main():
     }
 
     print("Loading train set")
-    dataset = get_iso_permuted_dataset(data_file, free_atom_densities)
-    random.shuffle(dataset)
+    train_dataset = get_iso_permuted_dataset(train_data_path, free_atom_densities)
+    random.shuffle(train_dataset)
 
     print("Loading test set")
-    test_dataset = get_iso_permuted_dataset(args.testset, free_atom_densities)
+    test_dataset = get_iso_permuted_dataset(test_data_path, free_atom_densities)
 
     if train_split is None:
-        train_split = len(dataset)
-    elif train_split > len(dataset):
+        train_split = len(train_dataset)
+    elif train_split > len(train_dataset):
         raise ValueError("Split is too large for the dataset.")
 
     if test_split is None:
@@ -116,7 +117,7 @@ def main():
         raise ValueError("Split is too large for the test set.")
 
     batch_size = 1
-    train_loader = torch_geometric.data.DataLoader(dataset[:train_split], batch_size=batch_size, shuffle=True)
+    train_loader = torch_geometric.data.DataLoader(train_dataset[:train_split], batch_size=batch_size, shuffle=True)
     test_loader = torch_geometric.data.DataLoader(test_dataset[:test_split], batch_size=batch_size, shuffle=True)
 
     model = Network(**model_kwargs)
@@ -149,12 +150,30 @@ def main():
         i_batch = epoch_start * len(train_loader)
 
     else:
-        writer = SummaryWriter(comment=f"_{args.run_comment}")
+        comment = f"_{args.run_comment}" if args.run_comment else ""
+        writer = SummaryWriter(comment=comment)
         run_dir = Path(writer.get_logdir())
         epoch_start = 0
         i_batch = 1
 
     print(f"Saving log to {run_dir}")
+
+    # Dump run information to run directory
+    with open(run_dir / "run_data.pickle", "wb") as f:
+        run_data = model_kwargs | {
+            "train_data_path": train_data_path.resolve(),
+            "train_dataset_size": train_split,
+            "test_data_path": test_data_path.resolve(),
+            "test_dataset_size": test_split,
+            "lr": lr,
+            "density_spacing": density_spacing,
+            "Rs": Rs,
+            "job_id": os.environ['SLURM_JOB_ID'],
+            "job_name": os.environ['SLURM_JOB_NAME']
+        }
+        pickle.dump(run_data, f)
+    with open(run_dir / "environment.yaml", "w") as f:
+        subprocess.run(["conda", "env", "export"], stdout=f)
 
     loss_cum = 0.0
     loss_perchannel_cum = np.zeros(len(Rs))
