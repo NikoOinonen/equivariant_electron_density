@@ -84,18 +84,18 @@ def main():
         "reduce_output": False,
     }
 
-    data_path = Path(__file__).parent.parent / "data"
+    free_atom_data_path = Path(__file__).parent.parent / "data" / "free_atom_s_only"
     free_atom_densities = {
-        1: data_path / "H_def2-universal-jfit-decon_density.out",
-        6: data_path / "C_def2-universal-jfit-decon_density.out",
-        7: data_path / "N_def2-universal-jfit-decon_density.out",
-        8: data_path / "O_def2-universal-jfit-decon_density.out",
-        9: data_path / "F_def2-universal-jfit-decon_density.out",
-        14: data_path / "Si_def2-universal-jfit-decon_density.out",
-        15: data_path / "P_def2-universal-jfit-decon_density.out",
-        16: data_path / "S_def2-universal-jfit-decon_density.out",
-        17: data_path / "Cl_def2-universal-jfit-decon_density.out",
-        35: data_path / "Br_def2-universal-jfit-decon_density.out",
+        1: free_atom_data_path / "H_def2-universal-jfit-decon_density.out",
+        6: free_atom_data_path / "C_def2-universal-jfit-decon_density.out",
+        7: free_atom_data_path / "N_def2-universal-jfit-decon_density.out",
+        8: free_atom_data_path / "O_def2-universal-jfit-decon_density.out",
+        9: free_atom_data_path / "F_def2-universal-jfit-decon_density.out",
+        14: free_atom_data_path / "Si_def2-universal-jfit-decon_density.out",
+        15: free_atom_data_path / "P_def2-universal-jfit-decon_density.out",
+        16: free_atom_data_path / "S_def2-universal-jfit-decon_density.out",
+        17: free_atom_data_path / "Cl_def2-universal-jfit-decon_density.out",
+        35: free_atom_data_path / "Br_def2-universal-jfit-decon_density.out",
     }
 
     print("Loading train set")
