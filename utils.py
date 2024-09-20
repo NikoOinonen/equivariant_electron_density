@@ -1,5 +1,6 @@
 # +
 from copy import deepcopy
+from pathlib import Path
 
 def flatten_list(nested_list):
     """Flatten an arbitrarily nested list, without recursion (to avoid
@@ -20,7 +21,7 @@ def flatten_list(nested_list):
             yield sublist
 # -
 
-def get_iso_permuted_dataset(picklefile, **atm_iso):
+def get_iso_permuted_dataset(data_path: Path, free_atom_density_paths: dict[int, Path]):
     import math
     import pickle
     import torch
@@ -30,55 +31,35 @@ def get_iso_permuted_dataset(picklefile, **atm_iso):
 
     dataset = []
 
-    for key, value in atm_iso.items():
-        if key=='h_iso':
-            h_data = torch.Tensor(np.loadtxt(value,skiprows=2,usecols=1))
-        elif key=='c_iso':
-            c_data = torch.Tensor(np.loadtxt(value,skiprows=2,usecols=1))
-        elif key=='n_iso':
-            n_data = torch.Tensor(np.loadtxt(value,skiprows=2,usecols=1))
-        elif key=='o_iso':
-            o_data = torch.Tensor(np.loadtxt(value,skiprows=2,usecols=1))
-        elif key=='p_iso':
-            p_data = torch.Tensor(np.loadtxt(value,skiprows=2,usecols=1))
-        else:
-            raise ValueError("Isolated atom type not found. Use kwargs \"h_iso\", \"c_iso\", etc.")
+    isos = {atom_type: torch.Tensor(np.loadtxt(path, skiprows=2, usecols=1)) for atom_type, path in free_atom_density_paths.items()}
 
-    for molecule in pickle.load( open (picklefile, "rb")):
+    with open(data_path, "rb") as f:
+        molecule_data = pickle.load(f)
+
+    for molecule in molecule_data:
         pos = molecule['pos']
         # z is atomic number- may want to make 1,0
-        z = molecule['type'].unsqueeze(1)
+        atom_types = molecule['type'].unsqueeze(1)
 
-        x = molecule['onehot']
+        onehot = molecule['onehot']
 
-        c = molecule['coefficients']
-        n = molecule['norms']
+        coefficients = molecule['coefficients']
+        norms = molecule['norms']
         exp = molecule['exponents']
 
-        full_c = copy.deepcopy(c)        
-        iso_c = torch.zeros_like(c)
+        full_coefficients = copy.deepcopy(coefficients)        
+        iso_coefficients = torch.zeros_like(coefficients)
         
         #now subtract the isolated atoms
-        for atom, iso, typ in zip(c,iso_c,z):
-            if typ.item() == 1.0:
-                atom[:list(h_data.shape)[0]] -= h_data
-                iso[:list(h_data.shape)[0]] += h_data
-            elif typ.item() == 6.0:
-                atom[:list(c_data.shape)[0]] -= c_data
-                iso[:list(c_data.shape)[0]] += c_data
-            elif typ.item() == 7.0:
-                atom[:list(n_data.shape)[0]] -= n_data
-                iso[:list(n_data.shape)[0]] += n_data
-            elif typ.item() == 8.0:
-                atom[:list(o_data.shape)[0]] -= o_data
-                iso[:list(o_data.shape)[0]] += o_data
-            elif typ.item() == 15.0:
-                atom[:list(p_data.shape)[0]] -= p_data
-                iso[:list(p_data.shape)[0]] += p_data
-            else:
-                raise ValueError("Isolated atom type not supported!")
+        for original_coeff, iso_coeff, typ in zip(coefficients, iso_coefficients, atom_types):
+            typ = int(typ)
+            if typ not in isos:
+                raise ValueError(f"Isolated atom type {typ} not supported!")
+            iso_data = isos[typ]
+            original_coeff[:list(iso_data.shape)[0]] -= iso_data
+            iso_coeff[:list(iso_data.shape)[0]] += iso_data
 
-        pop = torch.where(n != 0, c*2*math.sqrt(2)/n, n)
+        pop = torch.where(norms != 0, coefficients*2*math.sqrt(2)/norms, norms)
 
         #now permute, yzx -> xyz
         p_pos = copy.deepcopy(pos)
@@ -88,14 +69,14 @@ def get_iso_permuted_dataset(picklefile, **atm_iso):
 
         dataset += [torch_geometric.data.Data(pos=p_pos.to(torch.float32), 
                                               pos_orig=pos.to(torch.float32), 
-                                              z=z.to(torch.float32), 
-                                              x=x.to(torch.float32), 
+                                              z=atom_types.to(torch.float32), 
+                                              x=onehot.to(torch.float32), 
                                               y=pop.to(torch.float32), 
-                                              c=c.to(torch.float32), 
-                                              full_c=full_c.to(torch.float32), 
-                                              iso_c=iso_c.to(torch.float32), 
+                                              c=coefficients.to(torch.float32), 
+                                              full_c=full_coefficients.to(torch.float32), 
+                                              iso_c=iso_coefficients.to(torch.float32), 
                                               exp=exp.to(torch.float32), 
-                                              norm=n.to(torch.float32))]
+                                              norm=norms.to(torch.float32))]
 
     return dataset
 
