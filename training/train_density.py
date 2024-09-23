@@ -11,6 +11,7 @@ import torch
 import torch_geometric
 from e3nn import o3
 from e3nn.nn.models.gate_points_2101 import Network
+from torch.optim import Adam, lr_scheduler
 from torch.utils.tensorboard import SummaryWriter
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,6 +38,14 @@ def lossPerChannel(y_ml, y_target, Rs=[(12, 0), (5, 1), (4, 2), (2, 3), (1, 4)])
     return loss_perChannel_list
 
 
+def lr_schedule(i_batch, lr_init=1e-10, T_warm=1000, T_decay=10000):
+    if i_batch <= T_warm:
+        lr = lr_init + (1 - lr_init) * (i_batch / T_warm)
+    else:
+        lr = 1 / (1 + (i_batch - T_warm) / T_decay)
+    return lr
+
+
 def main():
     parser = argparse.ArgumentParser(description="train electron density")
     parser.add_argument("--dataset", type=str)
@@ -44,6 +53,7 @@ def main():
     parser.add_argument("--train_split", type=int)
     parser.add_argument("--test_split", type=int)
     parser.add_argument("--epochs", type=int, default=300)
+    parser.add_argument("--batch_average", type=int, default=1)
     parser.add_argument("--continue_run", type=str)
     parser.add_argument("--run_comment", type=str, default="")
     parser.add_argument("--ldep", type=bool, default=False)
@@ -63,11 +73,13 @@ def main():
     train_data_path = Path(args.dataset)
     test_data_path = Path(args.testset)
     num_epochs = args.epochs
+    batch_average = args.batch_average
     ldep_bool = args.ldep
 
     lr = 1e-2
+    lr_warm = 4000
+    lr_decay = 10000
     density_spacing = 0.25
-    save_interval = 1
     print_interval = 500
     model_kwargs = {
         "irreps_in": "10x 0e",  # irreps_in (= number of atom types)
@@ -116,15 +128,16 @@ def main():
     elif test_split > len(test_dataset):
         raise ValueError("Split is too large for the test set.")
 
-    batch_size = 1
-    train_loader = torch_geometric.data.DataLoader(train_dataset[:train_split], batch_size=batch_size, shuffle=True)
-    test_loader = torch_geometric.data.DataLoader(test_dataset[:test_split], batch_size=batch_size, shuffle=True)
+    train_loader = torch_geometric.data.DataLoader(train_dataset[:train_split], batch_size=1, shuffle=True)
+    test_loader = torch_geometric.data.DataLoader(test_dataset[:test_split], batch_size=1, shuffle=True)
 
     model = Network(**model_kwargs)
     model.to(device)
 
-    optim = torch.optim.Adam(model.parameters(), lr=lr)
+    optim = Adam(model.parameters(), lr=lr)
     optim.zero_grad()
+
+    scheduler = lr_scheduler.LambdaLR(optim, lambda nb: lr_schedule(nb, T_warm=lr_warm, T_decay=lr_decay))
 
     if args.continue_run:
 
@@ -144,6 +157,12 @@ def main():
         weights_path = weights_paths[-1]
         state = torch.load(weights_path)
         model.load_state_dict(state)
+
+        epoch_num = int(weights_path.name.split("_")[-1].split(".")[0])
+        optimizer_state = torch.load(run_dir / f"optimizer_epoch_{epoch_num}.pt")
+        optim.load_state_dict(optimizer_state["optimizer"])
+        scheduler.load_state_dict(optimizer_state["scheduler"])
+
         print(f"Continuing training using weights from {weights_path}")
 
         epoch_start = int(weights_path.name.split("_")[-1].split(".")[0])
@@ -165,11 +184,14 @@ def main():
             "train_dataset_size": train_split,
             "test_data_path": test_data_path.resolve(),
             "test_dataset_size": test_split,
+            "batch_average": batch_average,
             "lr": lr,
+            "lr_warm": lr_warm,
+            "lr_decay": lr_decay,
             "density_spacing": density_spacing,
             "Rs": Rs,
-            "job_id": os.environ['SLURM_JOB_ID'],
-            "job_name": os.environ['SLURM_JOB_NAME']
+            "job_id": os.environ["SLURM_JOB_ID"],
+            "job_name": os.environ["SLURM_JOB_NAME"],
         }
         pickle.dump(run_data, f)
     with open(run_dir / "environment.yaml", "w") as f:
@@ -179,28 +201,10 @@ def main():
     loss_perchannel_cum = np.zeros(len(Rs))
     mae_cum = 0.0
     mue_cum = 0.0
+
     for epoch in range(epoch_start, num_epochs):
 
         for step, data in enumerate(train_loader):
-
-            if i_batch % print_interval == 0:
-
-                print(f"Epoch {epoch + 1}, Train {step + 1}/{len(train_loader)}")
-
-                writer.add_scalar("Loss/Train", float(loss_cum) / print_interval, i_batch)
-                writer.add_scalar("Loss/Train l=0", float(loss_perchannel_cum[0]) / print_interval, i_batch)
-                writer.add_scalar("Loss/Train l=1", float(loss_perchannel_cum[1]) / print_interval, i_batch)
-                writer.add_scalar("Loss/Train l=2", float(loss_perchannel_cum[2]) / print_interval, i_batch)
-                writer.add_scalar("Loss/Train l=3", float(loss_perchannel_cum[3]) / print_interval, i_batch)
-                writer.add_scalar("Loss/Train l=4", float(loss_perchannel_cum[4]) / print_interval, i_batch)
-                writer.add_scalar("Metrics/Train_MAE", mae_cum / print_interval, i_batch)
-                writer.add_scalar("Metrics/Train_MUE", mue_cum / print_interval, i_batch)
-                writer.flush()
-
-                loss_cum = 0.0
-                loss_perchannel_cum = np.zeros(len(Rs))
-                mae_cum = 0.0
-                mue_cum = 0.0
 
             mask = torch.where(data.y == 0, torch.zeros_like(data.y), torch.ones_like(data.y)).detach()
             output = model(data.to(device))
@@ -211,21 +215,45 @@ def main():
                 if l == 0:
                     num_ele = sum(sum(y_ml[:, :mul])).detach()
 
-            mue_cum += num_ele
-            mae_cum += abs(num_ele)
+            mue_cum += num_ele / batch_average
+            mae_cum += abs(num_ele) / batch_average
 
             # compute loss per channel
             if ldep_bool:
-                loss_perchannel_cum += lossPerChannel(y_ml, data.y.to(device), Rs)
+                loss_perchannel_cum += lossPerChannel(y_ml, data.y.to(device), Rs) / batch_average
 
-            loss = err.pow(2).mean()
-            loss_cum += loss.detach().abs()
+            loss = err.pow(2).mean() / batch_average
+            loss_cum += loss.detach()
 
             loss.backward()
-            optim.step()
-            optim.zero_grad()
 
-            i_batch += 1
+            if (step + 1) % batch_average == 0 or (step + 1) == len(train_loader):
+
+                optim.step()
+                optim.zero_grad()
+                scheduler.step()
+
+                if i_batch % print_interval == 0:
+
+                    print(f"Epoch {epoch + 1}, Train {step + 1}/{len(train_loader)}")
+
+                    writer.add_scalar("Loss/Train", float(loss_cum) / print_interval, i_batch)
+                    writer.add_scalar("Loss/Train l=0", float(loss_perchannel_cum[0]) / print_interval, i_batch)
+                    writer.add_scalar("Loss/Train l=1", float(loss_perchannel_cum[1]) / print_interval, i_batch)
+                    writer.add_scalar("Loss/Train l=2", float(loss_perchannel_cum[2]) / print_interval, i_batch)
+                    writer.add_scalar("Loss/Train l=3", float(loss_perchannel_cum[3]) / print_interval, i_batch)
+                    writer.add_scalar("Loss/Train l=4", float(loss_perchannel_cum[4]) / print_interval, i_batch)
+                    writer.add_scalar("Metrics/Train_MAE", mae_cum / print_interval, i_batch)
+                    writer.add_scalar("Metrics/Train_MUE", mue_cum / print_interval, i_batch)
+                    writer.add_scalar("Other/Learning rate", scheduler.get_last_lr()[0], i_batch)
+                    writer.flush()
+
+                    loss_cum = 0.0
+                    loss_perchannel_cum = np.zeros(len(Rs))
+                    mae_cum = 0.0
+                    mue_cum = 0.0
+
+                i_batch += 1
 
         # now the test loop
         print(f"Epoch {epoch + 1} Test")
@@ -252,7 +280,7 @@ def main():
 
                 test_mue_cum += num_ele
                 test_mae_cum += abs(num_ele)
-                test_loss_cum += err.pow(2).mean().detach().abs()
+                test_loss_cum += err.pow(2).mean().detach()
 
                 if ldep_bool:
                     num_ele_target, _, bigI, ep, ep_per_l = get_scalar_density_comparisons(
@@ -269,10 +297,21 @@ def main():
                 bigIs_cum += bigI
                 eps_cum += ep
 
-        if epoch % save_interval == 0:
-            save_path = run_dir / f"model_weights_epoch_{epoch + 1}.pt"
-            torch.save(model.state_dict(), save_path)
-            print(f"Saved model weights on epoch {epoch + 1} to {save_path}.")
+        # Save model
+        save_path = run_dir / f"model_weights_epoch_{epoch + 1}.pt"
+        torch.save(model.state_dict(), save_path)
+        print(f"Saved model weights on epoch {epoch + 1} to {save_path}.")
+
+        # Save optimizer state
+        save_path = run_dir / f"optimizer_epoch_{epoch + 1}.pt"
+        torch.save(
+            {
+                "optimizer": optim.state_dict(),
+                "scheduler": scheduler.state_dict(),
+            },
+            save_path,
+        )
+        print(f"Saved optimizer state on epoch {epoch + 1} to {save_path}.")
 
         # eps per l and loss per l hard coded for def2 below
         writer.add_scalar("Loss/Test", float(test_loss_cum.item()) / len(test_loader), i_batch)
