@@ -31,6 +31,8 @@ def get_args():
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--batch_average", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-2)
+    parser.add_argument("--lr_warmup_batches", type=int, default=4000)
+    parser.add_argument("--lr_decay_batches", type=int, default=10000)
     parser.add_argument("--continue_run", type=str)
     parser.add_argument("--run_comment", type=str, default="")
     parser.add_argument("--ldep", type=bool, default=False)
@@ -124,8 +126,8 @@ def main(args):
     device = local_rank
 
     lr = args.learning_rate
-    lr_warm = 4000
-    lr_decay = 10000
+    lr_warm = args.lr_warmup_batches
+    lr_decay = args.lr_decay_batches
 
     density_spacing = 0.25
     print_interval = 500
