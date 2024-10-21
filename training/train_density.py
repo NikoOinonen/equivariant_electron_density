@@ -33,14 +33,17 @@ def get_args():
     parser.add_argument("--learning_rate", type=float, default=1e-2)
     parser.add_argument("--lr_warmup_batches", type=int, default=4000)
     parser.add_argument("--lr_decay_batches", type=int, default=10000)
+    parser.add_argument("--irreps_hidden", type=str, default="125-40-25-15")
+    parser.add_argument("--num_layers", type=int, default=3)
     parser.add_argument("--continue_run", type=str)
     parser.add_argument("--run_comment", type=str, default="")
     parser.add_argument("--ldep", type=bool, default=False)
     args = parser.parse_args()
 
-    args.world_size = int(os.environ["WORLD_SIZE"])
-    args.global_rank = int(os.environ["RANK"])
-    args.local_rank = int(os.environ["LOCAL_RANK"])
+    if "WORLD_SIZE" in os.environ:
+        args.world_size = int(os.environ["WORLD_SIZE"])
+        args.global_rank = int(os.environ["RANK"])
+        args.local_rank = int(os.environ["LOCAL_RANK"])
 
     return args
 
@@ -129,15 +132,18 @@ def main(args):
     lr_warm = args.lr_warmup_batches
     lr_decay = args.lr_decay_batches
 
+    irreps_hidden = [int(v) for v in args.irreps_hidden.split("-")]
+    num_layers = args.num_layers
+
     density_spacing = 0.25
     print_interval = 500
     model_kwargs = {
         "irreps_in": "10x 0e",  # irreps_in (= number of atom types)
-        "irreps_hidden": [(mul, (l, p)) for l, mul in enumerate([125, 40, 25, 15]) for p in [-1, 1]],  # irreps_hidden
+        "irreps_hidden": [(mul, (l, p)) for l, mul in enumerate(irreps_hidden) for p in [-1, 1]],  # irreps_hidden
         "irreps_out": "19x0e + 5x1o + 5x2e + 3x3o + 1x4e",  # irreps_out (= Rs)
         "irreps_node_attr": None,  # irreps_node_attr
         "irreps_edge_attr": o3.Irreps.spherical_harmonics(3),  # irreps_edge_attr
-        "layers": 3,
+        "layers": num_layers,
         "max_radius": 3.5,
         "number_of_basis": 10,
         "radial_layers": 1,

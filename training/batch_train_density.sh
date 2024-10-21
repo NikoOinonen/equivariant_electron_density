@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --time=01-00:00:00      # Job time allocation
+#SBATCH --time=04-00:00:00      # Job time allocation
 #SBATCH --gres=gpu:4            # Request GPU(s)
-#SBATCH -p gpu-h100-80g,gpu-a100-80g,gpu-v100-32g    # Request specific GPU partitions
+#SBATCH -p gpu-h100-80g,gpu-a100-80g    # Request specific GPU partitions
 #SBATCH --mem=64G               # Memory
 #SBATCH -c 8                    # Number of cores
 #SBATCH -J e3nn_train_density   # Job name
@@ -26,10 +26,12 @@ pip list
 num_gpus=$(echo "$SLURM_JOB_GPUS" | sed -e $'s/,/\\\n/g' | wc -l)
 echo "Number of GPUs: $num_gpus"
 
-lr=3e-2
-lr_warmup=8000
+lr=2e-2
+lr_warmup=4000
 lr_decay=10000
 batch_average=2
+irreps_hidden="125-40-25-15"
+num_layers=7
 
 # Run script
 torchrun \
@@ -40,10 +42,12 @@ torchrun \
     train_density.py \
         --dataset ../generate_density_datasets/dataset_train.pickle \
         --testset ../generate_density_datasets/dataset_val.pickle \
-        --epochs 20 \
+        --epochs 40 \
         --batch_average $batch_average \
         --learning_rate $lr \
         --lr_warmup_batches $lr_warmup \
         --lr_decay_batches $lr_decay \
+        --irreps_hidden $irreps_hidden \
+        --num_layers $num_layers \
         --ldep true \
-        --run_comment "gpu${num_gpus}_avg${batch_average}_lr${lr}_warmup${lr_warmup}_decay${lr_decay}"
+        --run_comment "gpu${num_gpus}_avg${batch_average}_lr${lr}_warmup${lr_warmup}_decay${lr_decay}_irreps${irreps_hidden}x${num_layers}" \
