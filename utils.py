@@ -25,7 +25,7 @@ def flatten_list(nested_list):
 # -
 
 
-def get_iso_permuted_dataset(data_path: Path, free_atom_density_paths: dict[int, Path]):
+def get_iso_permuted_dataset(data_path: Path, free_atom_density_paths: dict[int, Path], free_density_input=False, Rs=None):
     import math
     import pickle
     import torch
@@ -45,11 +45,21 @@ def get_iso_permuted_dataset(data_path: Path, free_atom_density_paths: dict[int,
         # z is atomic number- may want to make 1,0
         atom_types = molecule["type"].unsqueeze(1)
 
-        onehot = molecule["onehot"]
-
         coefficients = molecule["coefficients"]
         norms = molecule["norms"]
         exp = molecule["exponents"]
+
+        if free_density_input:
+            n0 = Rs[0][0]
+            x = []
+            for z in atom_types:
+                iso_data = isos[int(z)]
+                x_ = torch.zeros((n0,))
+                x_[:iso_data.shape[0]] = iso_data
+                x.append(x_)
+            x = torch.stack(x, axis=0)
+        else:
+            x = molecule["onehot"]
 
         full_coefficients = copy.deepcopy(coefficients)
         iso_coefficients = torch.zeros_like(coefficients)
@@ -76,7 +86,7 @@ def get_iso_permuted_dataset(data_path: Path, free_atom_density_paths: dict[int,
                 pos=p_pos.to(torch.float32),
                 pos_orig=pos.to(torch.float32),
                 z=atom_types.to(torch.float32),
-                x=onehot.to(torch.float32),
+                x=x.to(torch.float32),
                 y=pop.to(torch.float32),
                 c=coefficients.to(torch.float32),
                 full_c=full_coefficients.to(torch.float32),

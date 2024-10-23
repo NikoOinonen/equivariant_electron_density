@@ -35,6 +35,7 @@ def get_args():
     parser.add_argument("--lr_decay_batches", type=int, default=10000)
     parser.add_argument("--irreps_hidden", type=str, default="125-40-25-15")
     parser.add_argument("--num_layers", type=int, default=3)
+    parser.add_argument("--free_density_input", type=bool, default=False)
     parser.add_argument("--continue_run", type=str)
     parser.add_argument("--run_comment", type=str, default="")
     parser.add_argument("--ldep", type=bool, default=False)
@@ -48,9 +49,9 @@ def get_args():
     return args
 
 
-def get_dataloader(data_path, free_atom_densities, split, world_size, global_rank):
+def get_dataloader(data_path, free_atom_densities, free_density_input, Rs, split, world_size, global_rank):
 
-    dataset = get_iso_permuted_dataset(data_path, free_atom_densities)
+    dataset = get_iso_permuted_dataset(data_path, free_atom_densities, free_density_input, Rs)
 
     if split is None:
         split = len(dataset)
@@ -134,11 +135,13 @@ def main(args):
 
     irreps_hidden = [int(v) for v in args.irreps_hidden.split("-")]
     num_layers = args.num_layers
+    free_density_input = args.free_density_input
+    input_shape = Rs[0][0] if free_density_input else 10
 
     density_spacing = 0.25
     print_interval = 500
     model_kwargs = {
-        "irreps_in": "10x 0e",  # irreps_in (= number of atom types)
+        "irreps_in": f"{input_shape}x0e",
         "irreps_hidden": [(mul, (l, p)) for l, mul in enumerate(irreps_hidden) for p in [-1, 1]],  # irreps_hidden
         "irreps_out": "19x0e + 5x1o + 5x2e + 3x3o + 1x4e",  # irreps_out (= Rs)
         "irreps_node_attr": None,  # irreps_node_attr
@@ -171,8 +174,8 @@ def main(args):
 
     if global_rank == 0:
         print("Loading datasets...")
-    train_loader = get_dataloader(train_data_path, free_atom_densities, train_split, world_size, global_rank)
-    test_loader = get_dataloader(test_data_path, free_atom_densities, test_split, world_size, global_rank)
+    train_loader = get_dataloader(train_data_path, free_atom_densities, free_density_input, Rs, train_split, world_size, global_rank)
+    test_loader = get_dataloader(test_data_path, free_atom_densities, free_density_input, Rs, test_split, world_size, global_rank)
 
     model = Network(**model_kwargs)
     model.to(device)
@@ -245,6 +248,7 @@ def main(args):
                 "Rs": Rs,
                 "job_id": os.environ["SLURM_JOB_ID"],
                 "job_name": os.environ["SLURM_JOB_NAME"],
+                "free_density_input": free_density_input,
             }
             pickle.dump(run_data, f)
         with open(run_dir / "environment.yaml", "w") as f:

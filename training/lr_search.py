@@ -15,17 +15,21 @@ if __name__ == "__main__":
 
     torch.set_default_dtype(torch.float32)
 
+    Rs = [(19, 0), (5, 1), (5, 2), (3, 3), (1, 4)]
+
     train_data_path = Path(args.dataset)
     batch_average = args.batch_average
     irreps_hidden = [int(v) for v in args.irreps_hidden.split("-")]
     num_layers = args.num_layers
+    free_density_input = args.free_density_input
+    input_shape = Rs[0][0] if free_density_input else 10
 
     loss_log_path = Path(f"loss_log_lr_avg{batch_average}_{args.irreps_hidden}x{num_layers}.csv")
     with open(loss_log_path, "w") as f:
         f.write("i_batch,lr,loss\n")
 
     model_kwargs = {
-        "irreps_in": "10x 0e",  # irreps_in (= number of atom types)
+        "irreps_in": f"{input_shape}x0e",
         "irreps_hidden": [(mul, (l, p)) for l, mul in enumerate(irreps_hidden) for p in [-1, 1]],  # irreps_hidden
         "irreps_out": "19x0e + 5x1o + 5x2e + 3x3o + 1x4e",  # irreps_out (= Rs)
         "irreps_node_attr": None,  # irreps_node_attr
@@ -55,7 +59,15 @@ if __name__ == "__main__":
     }
 
     print("Loading train set")
-    train_loader = get_dataloader(train_data_path, free_atom_densities, split=None, world_size=1, global_rank=0)
+    train_loader = get_dataloader(
+        train_data_path,
+        free_atom_densities,
+        free_density_input,
+        Rs,
+        split=None,
+        world_size=1,
+        global_rank=0,
+    )
 
     model = Network(**model_kwargs)
     model.to(device)
