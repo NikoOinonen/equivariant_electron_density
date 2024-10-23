@@ -1,5 +1,6 @@
 import argparse
 import os
+import pickle
 import sys
 from pathlib import Path
 
@@ -64,13 +65,17 @@ def main():
 
     density_spacing = 0.1
     grid_buffer = 3.0
+
+    with open(run_dir / "run_data.pickle", "rb") as f:
+        params = pickle.load(f)
+
     model_kwargs = {
-        "irreps_in": "10x 0e",  # irreps_in (= number of atom types)
-        "irreps_hidden": [(mul, (l, p)) for l, mul in enumerate([125, 40, 25, 15]) for p in [-1, 1]],  # irreps_hidden
-        "irreps_out": "19x0e + 5x1o + 5x2e + 3x3o + 1x4e",  # irreps_out (= Rs)
+        "irreps_in": params["irreps_in"],
+        "irreps_hidden": params["irreps_hidden"],
+        "irreps_out": "19x0e + 5x1o + 5x2e + 3x3o + 1x4e",
         "irreps_node_attr": None,  # irreps_node_attr
         "irreps_edge_attr": o3.Irreps.spherical_harmonics(3),  # irreps_edge_attr
-        "layers": 3,
+        "layers": params["layers"],
         "max_radius": 3.5,
         "number_of_basis": 10,
         "radial_layers": 1,
@@ -100,7 +105,7 @@ def main():
     state = torch.load(weights_path)
     model.load_state_dict(state)
 
-    data_path = Path(__file__).parent.parent / "data"
+    data_path = Path(__file__).parent.parent / "data" / "free_atom_s_only"
     free_atom_densities = {
         1: data_path / "H_def2-universal-jfit-decon_density.out",
         6: data_path / "C_def2-universal-jfit-decon_density.out",
@@ -115,7 +120,7 @@ def main():
     }
 
     print("Loading test set")
-    dataset_path = get_iso_permuted_dataset(dataset_path, free_atom_densities)
+    dataset_path = get_iso_permuted_dataset(dataset_path, free_atom_densities, params["free_density_input"], Rs)
     test_loader = torch_geometric.data.DataLoader(dataset_path[:num_samples], batch_size=1, shuffle=False)
 
     print(f"Saving predictions to {out_dir}")
