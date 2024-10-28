@@ -42,7 +42,7 @@ def main():
     parser.add_argument("--out_dir", type=str)
     parser.add_argument("--weights_epoch", type=int)
     parser.add_argument("--dataset", type=str)
-    parser.add_argument("--num_samples", type=int)
+    parser.add_argument("--num_samples", type=int, default=5)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -57,7 +57,7 @@ def main():
     if args.out_dir:
         out_dir = Path(args.out_dir)
     else:
-        out_dir = run_dir / "predictions"
+        out_dir = run_dir / f"predictions_{dataset_path.stem}"
 
     # def2 basis set max irreps
     # WARNING. this is currently hard-coded for def2_universal
@@ -152,6 +152,8 @@ def main():
             save_to_xsf(out_dir / f"{step}_prediction.xsf", atom_pos, atom_types, ml_density, density_spacing)
             save_to_xsf(out_dir / f"{step}_diff.xsf", atom_pos, atom_types, density_diff, density_spacing)
             save_to_xsf(out_dir / f"{step}_relative_diff.xsf", atom_pos, atom_types, density_diff_rel, density_spacing)
+
+            print(f"Epsilon: {100 * np.abs(density_diff).sum() / target_density.sum():.3f}%")
 
 
 if __name__ == "__main__":
