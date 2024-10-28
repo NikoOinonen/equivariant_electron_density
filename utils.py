@@ -1,6 +1,7 @@
 # +
 from copy import deepcopy
 from pathlib import Path
+from typing import Optional
 
 
 def flatten_list(nested_list):
@@ -25,7 +26,13 @@ def flatten_list(nested_list):
 # -
 
 
-def get_iso_permuted_dataset(data_path: Path, free_atom_density_paths: dict[int, Path], free_density_input=False, Rs=None):
+def get_iso_permuted_dataset(
+    data_path: Path,
+    free_atom_density_paths: dict[int, Path],
+    free_density_input: bool = False,
+    Rs: Optional[list[tuple[int, int]]] = None,
+    exclude_elements: Optional[list[int]] = None,
+):
     import math
     import pickle
     import torch
@@ -43,7 +50,13 @@ def get_iso_permuted_dataset(data_path: Path, free_atom_density_paths: dict[int,
     for molecule in molecule_data:
         pos = molecule["pos"]
         # z is atomic number- may want to make 1,0
-        atom_types = molecule["type"].unsqueeze(1)
+        atom_types = molecule["type"]
+
+        if exclude_elements is not None:
+            if set(exclude_elements).intersection(atom_types.numpy()):
+                continue
+
+        atom_types = atom_types.unsqueeze(1)
 
         coefficients = molecule["coefficients"]
         norms = molecule["norms"]
@@ -55,7 +68,7 @@ def get_iso_permuted_dataset(data_path: Path, free_atom_density_paths: dict[int,
             exp_new = []
             n_atoms = coefficients.shape[0]
             rs_old_cumulative = 0
-            for (rs_target, rs_old) in zip(Rs, molecule["rs_max"]):
+            for rs_target, rs_old in zip(Rs, molecule["rs_max"]):
                 rs_target = rs_target[0] * (2 * rs_target[1] + 1)
                 rs_old = rs_old[0] * (2 * rs_old[1] + 1)
                 assert rs_target >= rs_old, f"Target basis set size ({rs_target}) is smaller than existing basis ({rs_old})"
@@ -75,7 +88,7 @@ def get_iso_permuted_dataset(data_path: Path, free_atom_density_paths: dict[int,
             for z in atom_types:
                 iso_data = isos[int(z)]
                 x_ = torch.zeros((n0,))
-                x_[:iso_data.shape[0]] = iso_data
+                x_[: iso_data.shape[0]] = iso_data
                 x.append(x_)
             x = torch.stack(x, axis=0)
         else:

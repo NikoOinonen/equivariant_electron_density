@@ -36,6 +36,7 @@ def get_args():
     parser.add_argument("--irreps_hidden", type=str, default="125-40-25-15")
     parser.add_argument("--num_layers", type=int, default=3)
     parser.add_argument("--free_density_input", type=bool, default=False)
+    parser.add_argument("--exclude_elements", type=str)
     parser.add_argument("--continue_run", type=str)
     parser.add_argument("--run_comment", type=str, default="")
     parser.add_argument("--ldep", type=bool, default=False)
@@ -49,9 +50,9 @@ def get_args():
     return args
 
 
-def get_dataloader(data_path, free_atom_densities, free_density_input, Rs, split, world_size, global_rank):
+def get_dataloader(data_path, free_atom_densities, free_density_input, Rs, exclude_elements, split, world_size, global_rank):
 
-    dataset = get_iso_permuted_dataset(data_path, free_atom_densities, free_density_input, Rs)
+    dataset = get_iso_permuted_dataset(data_path, free_atom_densities, free_density_input, Rs, exclude_elements)
 
     if split is None:
         split = len(dataset)
@@ -138,6 +139,10 @@ def main(args):
     free_density_input = args.free_density_input
     input_shape = Rs[0][0] if free_density_input else 10
 
+    exclude_elements = args.exclude_elements
+    if exclude_elements is not None:
+        exclude_elements = [int(v) for v in exclude_elements.split("-")]
+
     density_spacing = 0.25
     print_interval = 500
     model_kwargs = {
@@ -174,8 +179,12 @@ def main(args):
 
     if global_rank == 0:
         print("Loading datasets...")
-    train_loader = get_dataloader(train_data_path, free_atom_densities, free_density_input, Rs, train_split, world_size, global_rank)
-    test_loader = get_dataloader(test_data_path, free_atom_densities, free_density_input, Rs, test_split, world_size, global_rank)
+    train_loader = get_dataloader(
+        train_data_path, free_atom_densities, free_density_input, Rs, exclude_elements, train_split, world_size, global_rank,
+    )
+    test_loader = get_dataloader(
+        test_data_path, free_atom_densities, free_density_input, Rs, exclude_elements, test_split, world_size, global_rank,
+    )
 
     model = Network(**model_kwargs)
     model.to(device)

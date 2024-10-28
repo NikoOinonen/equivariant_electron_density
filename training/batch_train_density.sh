@@ -33,10 +33,14 @@ batch_average=2
 irreps_hidden="125-40-25-15"
 num_layers=7
 free_density_input="True"
+exclude_elements="15"
 
 comment="gpu${num_gpus}_avg${batch_average}_lr${lr}_warmup${lr_warmup}_decay${lr_decay}_irreps${irreps_hidden}x${num_layers}"
 if [ $free_density_input != "" ]; then
     comment="${comment}_density_input"
+fi
+if [ $exclude_elements != "" ]; then
+    comment="${comment}_exclude${exclude_elements}"
 fi
 
 # Run script
@@ -56,5 +60,6 @@ torchrun \
         --irreps_hidden $irreps_hidden \
         --num_layers $num_layers \
         --free_density_input $free_density_input \
+        --exclude_elements $exclude_elements \
         --ldep true \
         --run_comment $comment \

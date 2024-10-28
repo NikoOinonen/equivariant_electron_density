@@ -64,6 +64,7 @@ if __name__ == "__main__":
         free_atom_densities,
         free_density_input,
         Rs,
+        exclude_elements=None,
         split=None,
         world_size=1,
         global_rank=0,
