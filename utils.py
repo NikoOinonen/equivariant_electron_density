@@ -49,8 +49,28 @@ def get_iso_permuted_dataset(data_path: Path, free_atom_density_paths: dict[int,
         norms = molecule["norms"]
         exp = molecule["exponents"]
 
+        if Rs is not None and not np.allclose(Rs, molecule["rs_max"]):
+            coeffs_new = []
+            norms_new = []
+            exp_new = []
+            n_atoms = coefficients.shape[0]
+            rs_old_cumulative = 0
+            for (rs_target, rs_old) in zip(Rs, molecule["rs_max"]):
+                rs_target = rs_target[0] * (2 * rs_target[1] + 1)
+                rs_old = rs_old[0] * (2 * rs_old[1] + 1)
+                assert rs_target >= rs_old, f"Target basis set size ({rs_target}) is smaller than existing basis ({rs_old})"
+                pad = torch.zeros((n_atoms, rs_target - rs_old))
+                coeffs_new += [coefficients[:, rs_old_cumulative : rs_old_cumulative + rs_old], pad]
+                norms_new += [norms[:, rs_old_cumulative : rs_old_cumulative + rs_old], pad]
+                exp_new += [exp[:, rs_old_cumulative : rs_old_cumulative + rs_old], pad]
+                rs_old_cumulative += rs_old
+            coefficients = torch.cat(coeffs_new, axis=1)
+            norms = torch.cat(norms_new, axis=1)
+            exp = torch.cat(exp_new, axis=1)
+            molecule["rs_max"] = Rs
+
         if free_density_input:
-            n0 = Rs[0][0]
+            n0 = molecule["rs_max"][0][0]
             x = []
             for z in atom_types:
                 iso_data = isos[int(z)]
