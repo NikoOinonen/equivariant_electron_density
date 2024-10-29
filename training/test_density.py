@@ -7,43 +7,21 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch_geometric
-from ase import Atoms
-from ase.io.xsf import write_xsf
 from e3nn import o3
 from e3nn.nn.models.gate_points_2101 import Network
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import gau2grid_density_kdtree, get_iso_permuted_dataset, find_min_max
-
-
-def generate_grid(atom_pos: np.ndarray, spacing: float = 0.1, buffer: float = 2.0):
-
-    origin = atom_pos.min(axis=0) - buffer
-    n_points = ((atom_pos.max(axis=0) + buffer) - origin) // spacing + 1
-    n_points = n_points.astype(np.int32)
-
-    xyz = [np.linspace(origin[i], origin[i] + n_points[i] * spacing, n_points[i]) for i in range(3)]
-    x, y, z = np.meshgrid(*xyz, indexing="ij")
-
-    return x, y, z, origin
-
-
-def save_to_xsf(file_path: Path, atom_pos: np.ndarray, atom_types: np.ndarray, density: np.ndarray, lattice_spacing: float):
-    lattice = lattice_spacing * np.diag(density.shape)
-    atoms = Atoms(numbers=atom_types, positions=atom_pos, cell=lattice, pbc=True)
-    with open(file_path, "w") as f:
-        write_xsf(f, [atoms], data=density)
+from utils import get_iso_permuted_dataset, get_scalar_density_comparisons
 
 
 def main():
 
-    parser = argparse.ArgumentParser(description="Predict on trained model")
+    parser = argparse.ArgumentParser(description="Test trained model")
     parser.add_argument("--run_dir", type=str)
-    parser.add_argument("--out_dir", type=str)
     parser.add_argument("--weights_epoch", type=int)
-    parser.add_argument("--dataset", type=str)
+    parser.add_argument("--dataset", type=str, nargs="+")
+    parser.add_argument("--num_samples", type=int)
     parser.add_argument("--include_elements", type=str)
-    parser.add_argument("--num_samples", type=int, default=5)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -53,23 +31,20 @@ def main():
 
     run_dir = Path(args.run_dir)
     weights_epoch = args.weights_epoch
-    dataset_path = Path(args.dataset)
+    dataset_paths = [Path(p) for p in args.dataset]
     num_samples = args.num_samples
-    if args.out_dir:
-        out_dir = Path(args.out_dir)
-    else:
-        out_dir = run_dir / f"predictions_{dataset_path.stem}"
 
     include_elements = args.include_elements
     if include_elements is not None:
         include_elements = [int(v) for v in include_elements.split("-")]
+
+    print(f"Testing on dataset(s) {', '.join(args.dataset)} using model from {run_dir}.")
 
     # def2 basis set max irreps
     # WARNING. this is currently hard-coded for def2_universal
     Rs = [(19, 0), (5, 1), (5, 2), (3, 3), (1, 4)]
 
     density_spacing = 0.1
-    grid_buffer = 3.0
 
     with open(run_dir / "run_data.pickle", "rb") as f:
         params = pickle.load(f)
@@ -125,42 +100,41 @@ def main():
     }
 
     print("Loading test set")
-    dataset_path = get_iso_permuted_dataset(
-        dataset_path, free_atom_densities, params["free_density_input"], Rs, include_elements=include_elements
-    )
-    test_loader = torch_geometric.data.DataLoader(dataset_path[:num_samples], batch_size=1, shuffle=False)
+    dataset = []
+    for dataset_path in dataset_paths:
+        dataset += get_iso_permuted_dataset(
+            dataset_path,
+            free_atom_densities,
+            params["free_density_input"],
+            Rs,
+            include_elements=include_elements,
+        )
+    if num_samples is None:
+        num_samples = len(dataset)
+    test_loader = torch_geometric.data.DataLoader(dataset[:num_samples], batch_size=1, shuffle=False)
 
-    print(f"Saving predictions to {out_dir}")
-    out_dir.mkdir(exist_ok=True)
+    eps_cum = 0
+    eps_per_l_cum = np.zeros(len(Rs))
 
     with torch.no_grad():
 
         for step, data in enumerate(test_loader):
 
-            print(f"Prediction {step + 1}/{len(test_loader)}")
+            print(f"Sample {step + 1}/{len(test_loader)}")
 
             mask = torch.where(data.y == 0, torch.zeros_like(data.y), torch.ones_like(data.y)).detach()
             y_ml = model(data.to(device)) * mask.to(device)
 
-            atom_pos = data["pos_orig"].cpu().numpy()
-            x, y, z, origin = generate_grid(atom_pos, spacing=density_spacing, buffer=grid_buffer)
-            target_density, ml_density = gau2grid_density_kdtree(x.flatten(), y.flatten(), z.flatten(), data, y_ml, Rs, ldepb=False)
+            _, _, _, eps, eps_per_l = get_scalar_density_comparisons(data, y_ml, Rs, spacing=density_spacing, buffer=3.0, ldep=True)
+            eps_cum += eps
+            eps_per_l_cum += eps_per_l
 
-            target_density = target_density.reshape(x.shape)
-            ml_density = ml_density.reshape(x.shape)
-            density_diff = target_density - ml_density
-            density_diff_rel = density_diff / target_density
-            density_diff_rel[target_density < 1e-4] = 0
-
-            atom_pos -= origin
-            atom_types = data["z"][:, 0].int().cpu().numpy()
-
-            save_to_xsf(out_dir / f"{step}_target.xsf", atom_pos, atom_types, target_density, density_spacing)
-            save_to_xsf(out_dir / f"{step}_prediction.xsf", atom_pos, atom_types, ml_density, density_spacing)
-            save_to_xsf(out_dir / f"{step}_diff.xsf", atom_pos, atom_types, density_diff, density_spacing)
-            save_to_xsf(out_dir / f"{step}_relative_diff.xsf", atom_pos, atom_types, density_diff_rel, density_spacing)
-
-            print(f"Epsilon: {100 * np.abs(density_diff).sum() / target_density.sum():.3f}%")
+    print("\nEpsilon:", eps_cum / len(test_loader))
+    print("Epsilon l=0", eps_per_l_cum[0] / len(test_loader))
+    print("Epsilon l=1", eps_per_l_cum[1] / len(test_loader))
+    print("Epsilon l=2", eps_per_l_cum[2] / len(test_loader))
+    print("Epsilon l=3", eps_per_l_cum[3] / len(test_loader))
+    print("Epsilon l=4", eps_per_l_cum[4] / len(test_loader))
 
 
 if __name__ == "__main__":

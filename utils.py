@@ -32,6 +32,7 @@ def get_iso_permuted_dataset(
     free_density_input: bool = False,
     Rs: Optional[list[tuple[int, int]]] = None,
     exclude_elements: Optional[list[int]] = None,
+    include_elements: Optional[list[int]] = None,
 ):
     import math
     import pickle
@@ -53,7 +54,13 @@ def get_iso_permuted_dataset(
         atom_types = molecule["type"]
 
         if exclude_elements is not None:
+            # Skip if includes an element in exclude_elements
             if set(exclude_elements).intersection(atom_types.numpy()):
+                continue
+
+        if include_elements is not None:
+            # Skip if does not include an element in include_elements
+            if not set(include_elements).intersection(atom_types.numpy()):
                 continue
 
         atom_types = atom_types.unsqueeze(1)
