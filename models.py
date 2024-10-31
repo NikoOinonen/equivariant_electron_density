@@ -6,7 +6,7 @@ import torch
 from e3nn import o3
 from e3nn.math import soft_one_hot_linspace
 from e3nn.nn import Gate
-from e3nn.nn.models.gate_points_2101 import smooth_cutoff, tp_path_exists
+from e3nn.nn.models.gate_points_2101 import smooth_cutoff, tp_path_exists, Convolution
 from torch_cluster import radius_graph
 from torch_geometric.data import Data
 from torch_scatter import scatter
@@ -16,17 +16,6 @@ from mace_layer.blocks import (
     EquivariantProductBasisBlock,
     RealAgnosticResidualInteractionBlock,
 )
-
-
-class Compose(torch.nn.Module):
-    def __init__(self, first, second) -> None:
-        super().__init__()
-        self.first = first
-        self.second = second
-
-    def forward(self, *input):
-        x = self.first(*input)
-        return self.second(x)
 
 
 class MACE_layer(torch.nn.Module):
@@ -114,7 +103,7 @@ class MaceNetwork(torch.nn.Module):
 
     def __init__(
         self,
-        irreps_in: Optional[o3.Irreps],
+        irreps_in: o3.Irreps,
         irreps_hidden: o3.Irreps,
         irreps_out: o3.Irreps,
         node_attr_dim: Optional[int],
@@ -136,7 +125,7 @@ class MaceNetwork(torch.nn.Module):
         self.num_nodes = num_nodes
         self.reduce_output = reduce_output
 
-        self.irreps_in = o3.Irreps(irreps_in) if irreps_in is not None else None
+        self.irreps_in = o3.Irreps(irreps_in)
         self.irreps_hidden = o3.Irreps(irreps_hidden)
         self.irreps_out = o3.Irreps(irreps_out)
         self.node_attr_dim = node_attr_dim if node_attr_dim is not None else 1
@@ -144,10 +133,7 @@ class MaceNetwork(torch.nn.Module):
         self.irreps_edge_attr = o3.Irreps.spherical_harmonics(max_l_edges)
         self.message_correlation_order = message_correlation_order
 
-        self.input_has_node_in = irreps_in is not None
         self.input_has_node_attr = node_attr_dim is not None
-
-        irreps = self.irreps_in if self.irreps_in is not None else o3.Irreps("0e")
 
         act = {
             1: torch.nn.functional.silu,
@@ -158,16 +144,26 @@ class MaceNetwork(torch.nn.Module):
             -1: torch.tanh,
         }
 
+        self.node_embed = o3.Linear(irreps_in=self.irreps_in, irreps_out=self.irreps_hidden)
         self.layers = torch.nn.ModuleList()
+        node_feats_irreps = self.irreps_hidden
 
         for _ in range(layers):
             irreps_scalars = o3.Irreps(
-                [(mul, ir) for mul, ir in self.irreps_hidden if ir.l == 0 and tp_path_exists(irreps, self.irreps_edge_attr, ir)]
+                [
+                    (mul, ir)
+                    for mul, ir in self.irreps_hidden
+                    if ir.l == 0 and tp_path_exists(node_feats_irreps, self.irreps_edge_attr, ir)
+                ]
             )
             irreps_gated = o3.Irreps(
-                [(mul, ir) for mul, ir in self.irreps_hidden if ir.l > 0 and tp_path_exists(irreps, self.irreps_edge_attr, ir)]
+                [
+                    (mul, ir)
+                    for mul, ir in self.irreps_hidden
+                    if ir.l > 0 and tp_path_exists(node_feats_irreps, self.irreps_edge_attr, ir)
+                ]
             )
-            ir = "0e" if tp_path_exists(irreps, self.irreps_edge_attr, "0e") else "0o"
+            ir = "0e" if tp_path_exists(node_feats_irreps, self.irreps_edge_attr, "0e") else "0o"
             irreps_gates = o3.Irreps([(mul, ir) for mul, _ in irreps_gated])
 
             gate = Gate(
@@ -181,36 +177,24 @@ class MaceNetwork(torch.nn.Module):
                 correlation=message_correlation_order,
                 node_attr_dim=self.node_attr_dim,
                 edge_attr_irreps=self.irreps_edge_attr,
-                hidden_irreps=gate.irreps_in,
-                node_feats_irreps=irreps,
+                hidden_irreps=self.irreps_hidden,
+                node_feats_irreps=node_feats_irreps,
                 edge_feats_irreps=o3.Irreps(f"{number_of_basis}x0e"),
                 avg_num_neighbors=num_neighbors,
             )
-            irreps = gate.irreps_out
-            self.layers.append(Compose(conv, gate))
+            linear = o3.Linear(irreps_in=self.irreps_hidden, irreps_out=gate.irreps_in)
+            node_feats_irreps = gate.irreps_out
+            self.layers.append(torch.nn.ModuleList([conv, linear, gate]))
 
-        # self.layers.append(
-        #     Convolution(
-        #         irreps,
-        #         self.irreps_node_attr,
-        #         self.irreps_edge_attr,
-        #         self.irreps_out,
-        #         number_of_basis,
-        #         radial_layers,
-        #         radial_neurons,
-        #         num_neighbors,
-        #     )
-        # )
-        self.layers.append(
-            MACE_layer(
-                correlation=message_correlation_order,
-                node_attr_dim=self.node_attr_dim,
-                edge_attr_irreps=self.irreps_edge_attr,
-                hidden_irreps=gate.irreps_in,
-                node_feats_irreps=irreps,
-                edge_feats_irreps=o3.Irreps(f"{number_of_basis}x0e"),
-                avg_num_neighbors=num_neighbors,
-            )
+        self.readout = Convolution(
+            irreps_in=node_feats_irreps,
+            irreps_node_attr=o3.Irreps([(self.node_attr_dim, (0, 1))]),
+            irreps_edge_attr=self.irreps_edge_attr,
+            irreps_out=self.irreps_out,
+            number_of_basis=number_of_basis,
+            radial_layers=1,
+            radial_neurons=64,
+            num_neighbors=num_neighbors,
         )
 
     def forward(self, data: Union[Data, Dict[str, torch.Tensor]]) -> torch.Tensor:
@@ -237,17 +221,10 @@ class MaceNetwork(torch.nn.Module):
         edge_vec = data["pos"][edge_src] - data["pos"][edge_dst]
         edge_sh = o3.spherical_harmonics(self.irreps_edge_attr, edge_vec, True, normalization="component")
         edge_length = edge_vec.norm(dim=1)
-        edge_length_embedded = soft_one_hot_linspace(
+        edge_feats = soft_one_hot_linspace(
             x=edge_length, start=0.0, end=self.max_radius, number=self.number_of_basis, basis="gaussian", cutoff=False
         ).mul(self.number_of_basis**0.5)
         edge_attr = smooth_cutoff(edge_length / self.max_radius)[:, None] * edge_sh
-
-        if self.input_has_node_in and "x" in data:
-            assert self.irreps_in is not None
-            x = data["x"]
-        else:
-            assert self.irreps_in is None
-            x = data["pos"].new_ones((data["pos"].shape[0], 1))
 
         if self.input_has_node_attr and "z" in data:
             z = data["z"]
@@ -255,9 +232,13 @@ class MaceNetwork(torch.nn.Module):
             assert self.node_attr_dim == 1
             z = data["pos"].new_ones((data["pos"].shape[0], 1))
 
-        for layer in self.layers:
-            # x = layer(x, z, edge_src, edge_dst, edge_attr, edge_length_embedded)
-            x = layer(x, z, edge_attr, edge_length_embedded, edge_index)
+        x = self.node_embed(data["x"])
+        for conv, linear, gate in self.layers:
+            x = conv(x, z, edge_attr, edge_feats, edge_index)
+            x = linear(x)
+            x = gate(x)
+
+        x = self.readout(x, z, edge_src, edge_dst, edge_attr, edge_feats)
 
         if self.reduce_output:
             return scatter(x, batch, dim=0).div(self.num_nodes**0.5)
@@ -270,7 +251,7 @@ if __name__ == "__main__":
     model = MaceNetwork(
         irreps_in="10x0e",
         # irreps_hidden=[(mul, (l, p)) for l, mul in enumerate([125, 40, 25, 15]) for p in [-1, 1]],
-        irreps_hidden="125x0e + 40x1o + 25x2e + 15x3o",
+        irreps_hidden="20x0e + 20x1o + 20x2e + 20x3o + 20x4e",
         irreps_out="19x0e + 5x1o + 5x2e + 3x3o + 1x4e",
         node_attr_dim=None,
         max_l_edges=4,
@@ -283,7 +264,7 @@ if __name__ == "__main__":
         reduce_output=False,
     )
 
-    # print(sum(p.numel() for p in model.parameters() if p.requires_grad))
+    print(sum(p.numel() for p in model.parameters() if p.requires_grad))
 
     data = {
         "pos": torch.rand(1, 5),
