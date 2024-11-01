@@ -1,10 +1,13 @@
+import os
+import sys
 from pathlib import Path
 
 import torch
-from e3nn import o3
-from e3nn.nn.models.gate_points_2101 import Network
 from torch.optim import Adam, lr_scheduler
 from train_density import get_args, get_dataloader
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from models import MaceNetwork
 
 if __name__ == "__main__":
 
@@ -19,7 +22,17 @@ if __name__ == "__main__":
 
     train_data_path = Path(args.dataset)
     batch_average = args.batch_average
-    irreps_hidden = [int(v) for v in args.irreps_hidden.split("-")]
+
+    # The MACE layers only work with alternating parities for the irreps: https://github.com/ACEsuit/mace/discussions/42
+    parity = [1, -1]
+    irreps_hidden = [(int(channels), (l, parity[l % 2])) for l, channels in enumerate(args.irreps_hidden.split("-"))]
+    irreps_out = [(channels, (l, parity[l % 2])) for channels, l in Rs]
+
+    # https://github.com/ACEsuit/mace/issues/63
+    assert len(set(c for c, _ in irreps_hidden)) == 1, "Hidden irreps must have the same number of channels for all l-orders."
+
+    max_l_edges = len(irreps_hidden) - 1
+    message_correlation_order = args.correlation_order
     num_layers = args.num_layers
     free_density_input = args.free_density_input
     input_shape = Rs[0][0] if free_density_input else 10
@@ -30,17 +43,16 @@ if __name__ == "__main__":
 
     model_kwargs = {
         "irreps_in": f"{input_shape}x0e",
-        "irreps_hidden": [(mul, (l, p)) for l, mul in enumerate(irreps_hidden) for p in [-1, 1]],  # irreps_hidden
-        "irreps_out": "19x0e + 5x1o + 5x2e + 3x3o + 1x4e",  # irreps_out (= Rs)
-        "irreps_node_attr": None,  # irreps_node_attr
-        "irreps_edge_attr": o3.Irreps.spherical_harmonics(3),  # irreps_edge_attr
+        "irreps_hidden": irreps_hidden,
+        "irreps_out": irreps_out,  # = Rs
+        "node_attr_dim": None,
+        "max_l_edges": max_l_edges,
+        "message_correlation_order": message_correlation_order,
         "layers": num_layers,
         "max_radius": 3.5,
         "number_of_basis": 10,
-        "radial_layers": 1,
-        "radial_neurons": 128,
         "num_neighbors": 12.2298,
-        "num_nodes": 24,
+        "num_nodes": 26,
         "reduce_output": False,
     }
 
@@ -70,7 +82,7 @@ if __name__ == "__main__":
         global_rank=0,
     )
 
-    model = Network(**model_kwargs)
+    model = MaceNetwork(**model_kwargs)
     model.to(device)
 
     optim = Adam(model.parameters(), lr=1e-6)

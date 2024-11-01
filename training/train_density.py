@@ -11,13 +11,12 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch_geometric
-from e3nn import o3
-from e3nn.nn.models.gate_points_2101 import Network
 from torch.nn.parallel import DistributedDataParallel
 from torch.optim import Adam, lr_scheduler
 from torch.utils.tensorboard import SummaryWriter
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from models import MaceNetwork
 from utils import get_iso_permuted_dataset, get_scalar_density_comparisons
 
 
@@ -33,7 +32,8 @@ def get_args():
     parser.add_argument("--learning_rate", type=float, default=1e-2)
     parser.add_argument("--lr_warmup_batches", type=int, default=4000)
     parser.add_argument("--lr_decay_batches", type=int, default=10000)
-    parser.add_argument("--irreps_hidden", type=str, default="125-40-25-15")
+    parser.add_argument("--irreps_hidden", type=str, default="64-64-64")
+    parser.add_argument("--correlation_order", type=int, default=3)
     parser.add_argument("--num_layers", type=int, default=3)
     parser.add_argument("--free_density_input", type=bool, default=False)
     parser.add_argument("--exclude_elements", type=str)
@@ -134,34 +134,44 @@ def main(args):
     lr_warm = args.lr_warmup_batches
     lr_decay = args.lr_decay_batches
 
-    irreps_hidden = [int(v) for v in args.irreps_hidden.split("-")]
+    # The MACE layers only work with alternating parities for the irreps: https://github.com/ACEsuit/mace/discussions/42
+    parity = [1, -1]
+    irreps_hidden = [(int(channels), (l, parity[l % 2])) for l, channels in enumerate(args.irreps_hidden.split("-"))]
+    irreps_out = [(channels, (l, parity[l % 2])) for channels, l in Rs]
+
+    # https://github.com/ACEsuit/mace/issues/63
+    assert len(set(c for c, _ in irreps_hidden)) == 1, "Hidden irreps must have the same number of channels for all l-orders."
+
+    max_l_edges = len(irreps_hidden) - 1
+    message_correlation_order = args.correlation_order
     num_layers = args.num_layers
     free_density_input = args.free_density_input
     input_shape = Rs[0][0] if free_density_input else 10
 
     exclude_elements = args.exclude_elements
-    if exclude_elements is not None:
+    if exclude_elements:
         exclude_elements = [int(v) for v in exclude_elements.split("-")]
 
     density_spacing = 0.25
     print_interval = 500
     model_kwargs = {
         "irreps_in": f"{input_shape}x0e",
-        "irreps_hidden": [(mul, (l, p)) for l, mul in enumerate(irreps_hidden) for p in [-1, 1]],  # irreps_hidden
-        "irreps_out": "19x0e + 5x1o + 5x2e + 3x3o + 1x4e",  # irreps_out (= Rs)
-        "irreps_node_attr": None,  # irreps_node_attr
-        "irreps_edge_attr": o3.Irreps.spherical_harmonics(3),  # irreps_edge_attr
+        "irreps_hidden": irreps_hidden,
+        "irreps_out": irreps_out,  # = Rs
+        "node_attr_dim": None,
+        "max_l_edges": max_l_edges,
+        "message_correlation_order": message_correlation_order,
         "layers": num_layers,
         "max_radius": 3.5,
         "number_of_basis": 10,
-        "radial_layers": 1,
-        "radial_neurons": 128,
         "num_neighbors": 12.2298,
-        "num_nodes": 24,
+        "num_nodes": 26,
         "reduce_output": False,
     }
 
     print(f"Starting on global rank {global_rank}, local rank {local_rank}. World size {world_size}\n", flush=True)
+    if global_rank == 0:
+        print(f"Model kwargs: {model_kwargs}")
 
     free_atom_data_path = Path(__file__).parent.parent / "data" / "free_atom_s_only"
     free_atom_densities = {
@@ -180,19 +190,36 @@ def main(args):
     if global_rank == 0:
         print("Loading datasets...")
     train_loader = get_dataloader(
-        train_data_path, free_atom_densities, free_density_input, Rs, exclude_elements, train_split, world_size, global_rank,
+        train_data_path,
+        free_atom_densities,
+        free_density_input,
+        Rs,
+        exclude_elements,
+        train_split,
+        world_size,
+        global_rank,
     )
     test_loader = get_dataloader(
-        test_data_path, free_atom_densities, free_density_input, Rs, exclude_elements, test_split, world_size, global_rank,
+        test_data_path,
+        free_atom_densities,
+        free_density_input,
+        Rs,
+        exclude_elements,
+        test_split,
+        world_size,
+        global_rank,
     )
 
-    model = Network(**model_kwargs)
+    model = MaceNetwork(**model_kwargs)
     model.to(device)
 
     optim = Adam(model.parameters(), lr=lr)
     optim.zero_grad()
 
     scheduler = lr_scheduler.LambdaLR(optim, lambda nb: lr_schedule(nb, T_warm=lr_warm, T_decay=lr_decay))
+
+    if global_rank == 0:
+        print(f"Number of parameters:", sum(p.numel() for p in model.parameters() if p.requires_grad))
 
     if args.continue_run:
 

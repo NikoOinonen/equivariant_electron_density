@@ -6,7 +6,6 @@
 #SBATCH -c 8                    # Number of cores
 #SBATCH -J e3nn_train_density   # Job name
 #SBATCH -o logs/train_%j.log    # Output file
-#SBATCH --exclude dgx[4-7]      # The dgx nodes are somehow slow
 
 # Load modules
 module load mamba
@@ -26,20 +25,22 @@ pip list
 num_gpus=$(echo "$SLURM_JOB_GPUS" | sed -e $'s/,/\\\n/g' | wc -l)
 echo "Number of GPUs: $num_gpus"
 
-lr=2e-2
+lr=5e-3
 lr_warmup=4000
 lr_decay=10000
 batch_average=2
-irreps_hidden="125-40-25-15"
-num_layers=7
+irreps_hidden="64-64-64"
+num_layers=2
+correlation_order=3
 free_density_input="True"
-exclude_elements="15"
+exclude_elements=""
 
-comment="gpu${num_gpus}_avg${batch_average}_lr${lr}_warmup${lr_warmup}_decay${lr_decay}_irreps${irreps_hidden}x${num_layers}"
-if [ $free_density_input != "" ]; then
+batch_size=$(( num_gpus * batch_average ))
+comment="bs${batch_size}_lr${lr}-${lr_warmup}-${lr_decay}_irreps${irreps_hidden}x${num_layers}_corr${correlation_order}"
+if [ "$free_density_input" != "" ]; then
     comment="${comment}_density_input"
 fi
-if [ $exclude_elements != "" ]; then
+if [ "$exclude_elements" != "" ]; then
     comment="${comment}_exclude${exclude_elements}"
 fi
 
@@ -59,7 +60,8 @@ torchrun \
         --lr_decay_batches $lr_decay \
         --irreps_hidden $irreps_hidden \
         --num_layers $num_layers \
-        --free_density_input $free_density_input \
-        --exclude_elements $exclude_elements \
+        --correlation_order $correlation_order \
+        --free_density_input "$free_density_input" \
+        --exclude_elements "$exclude_elements" \
         --ldep true \
         --run_comment $comment \
