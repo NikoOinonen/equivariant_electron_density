@@ -25,18 +25,18 @@ pip list
 num_gpus=$(echo "$SLURM_JOB_GPUS" | sed -e $'s/,/\\\n/g' | wc -l)
 echo "Number of GPUs: $num_gpus"
 
-lr=5e-3
-lr_warmup=4000
-lr_decay=10000
+lr=1.5e-3
+lr_warmup=8000
+lr_decay=1e9
 batch_average=2
-irreps_hidden="64-64-64"
-num_layers=2
+irreps_hidden="128-128-128-128"
+num_layers=6
 correlation_order=3
 free_density_input="True"
 exclude_elements=""
 
 batch_size=$(( num_gpus * batch_average ))
-comment="bs${batch_size}_lr${lr}-${lr_warmup}-${lr_decay}_irreps${irreps_hidden}x${num_layers}_corr${correlation_order}"
+comment="simple_bs${batch_size}_lr${lr}-${lr_warmup}-${lr_decay}_irreps${irreps_hidden}x${num_layers}_corr${correlation_order}"
 if [ "$free_density_input" != "" ]; then
     comment="${comment}_density_input"
 fi
