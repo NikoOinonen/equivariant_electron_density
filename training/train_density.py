@@ -28,6 +28,7 @@ def get_args():
     parser.add_argument("--train_split", type=int)
     parser.add_argument("--test_split", type=int)
     parser.add_argument("--epochs", type=int, default=300)
+    parser.add_argument("--test_epochs", type=int, default=1)
     parser.add_argument("--batch_average", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-2)
     parser.add_argument("--lr_warmup_batches", type=float, default=4000)
@@ -122,6 +123,7 @@ def main(args):
     train_data_path = Path(args.dataset)
     test_data_path = Path(args.testset)
     num_epochs = args.epochs
+    test_epochs = args.test_epochs
     batch_average = args.batch_average
     ldep_bool = args.ldep
 
@@ -299,6 +301,9 @@ def main(args):
 
         t0_train = time.perf_counter()
 
+        if global_rank == 0:
+            print(f"Epoch {epoch + 1} Train")
+
         for step, data in enumerate(train_loader):
 
             mask = torch.where(data.y == 0, torch.zeros_like(data.y), torch.ones_like(data.y)).detach()
@@ -358,6 +363,12 @@ def main(args):
 
         if global_rank == 0:
             print(f"Train time: {time.perf_counter() - t0_train}")
+
+        # Only test every test_epochs and on last epoch
+        if epoch % test_epochs != 0 and epoch != (num_epochs - 1):
+            continue
+
+        if global_rank == 0:
             print(f"Epoch {epoch + 1} Test")
             t0_test = time.perf_counter()
 
