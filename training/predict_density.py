@@ -10,10 +10,12 @@ import torch_geometric
 from ase import Atoms
 from ase.io.xsf import write_xsf
 from e3nn import o3
-from e3nn.nn.models.gate_points_2101 import Network
+
+# from e3nn.nn.models.gate_points_2101 import Network
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import gau2grid_density_kdtree, get_iso_permuted_dataset, find_min_max
+from models import MaceNetwork
 
 
 def generate_grid(atom_pos: np.ndarray, spacing: float = 0.1, buffer: float = 2.0):
@@ -28,11 +30,36 @@ def generate_grid(atom_pos: np.ndarray, spacing: float = 0.1, buffer: float = 2.
     return x, y, z, origin
 
 
-def save_to_xsf(file_path: Path, atom_pos: np.ndarray, atom_types: np.ndarray, density: np.ndarray, lattice_spacing: float):
+def save_to_xsf(
+    file_path: Path, atom_pos: np.ndarray, atom_types: np.ndarray, density: np.ndarray, lattice_spacing: float
+):
     lattice = lattice_spacing * np.diag(density.shape)
     atoms = Atoms(numbers=atom_types, positions=atom_pos, cell=lattice, pbc=True)
     with open(file_path, "w") as f:
         write_xsf(f, [atoms], data=density)
+
+
+def complete_coefficients(data, ml_y, rs):
+    ml_coeffs_full = np.zeros(data.full_c.shape)
+    for i_atom, (iso_coeffs, ml_coeffs, norm) in enumerate(
+        zip(
+            data.iso_c.cpu().detach().numpy(),
+            ml_y.cpu().detach().numpy(),
+            data.norm.cpu().detach().numpy(),
+        )
+    ):
+        counter = 0
+        for mul, l in rs:
+            for _ in range(mul):
+                normal = norm[counter]
+                if normal != 0:
+                    pop_ml = ml_coeffs[counter : counter + (2 * l + 1)]
+                    c_ml = pop_ml * normal / (2 * np.sqrt(2))
+                    ml_coeffs_full[i_atom, counter : counter + (2 * l + 1)] = (
+                        c_ml + iso_coeffs[counter : counter + (2 * l + 1)]
+                    )
+                counter += 2 * l + 1
+    return ml_coeffs_full
 
 
 def main():
@@ -64,10 +91,6 @@ def main():
     if include_elements is not None:
         include_elements = [int(v) for v in include_elements.split("-")]
 
-    # def2 basis set max irreps
-    # WARNING. this is currently hard-coded for def2_universal
-    Rs = [(19, 0), (5, 1), (5, 2), (3, 3), (1, 4)]
-
     density_spacing = 0.1
     grid_buffer = 3.0
 
@@ -75,22 +98,24 @@ def main():
         params = pickle.load(f)
 
     model_kwargs = {
-        "irreps_in": params["irreps_in"],
-        "irreps_hidden": params["irreps_hidden"],
-        "irreps_out": "19x0e + 5x1o + 5x2e + 3x3o + 1x4e",
-        "irreps_node_attr": None,  # irreps_node_attr
-        "irreps_edge_attr": o3.Irreps.spherical_harmonics(3),  # irreps_edge_attr
-        "layers": params["layers"],
-        "max_radius": 3.5,
-        "number_of_basis": 10,
-        "radial_layers": 1,
-        "radial_neurons": 128,
-        "num_neighbors": 12.2298,
-        "num_nodes": 24,
-        "reduce_output": False,
+        n: params[n]
+        for n in [
+            "irreps_in",
+            "irreps_hidden",
+            "irreps_out",
+            "node_attr_dim",
+            "max_l_edges",
+            "message_correlation_order",
+            "layers",
+            "max_radius",
+            "number_of_basis",
+            "num_neighbors",
+            "num_nodes",
+            "reduce_output",
+        ]
     }
 
-    model = Network(**model_kwargs)
+    model = MaceNetwork(**model_kwargs)
     model.to(device)
 
     if weights_epoch:
@@ -107,7 +132,7 @@ def main():
         weights_path = weights_paths[-1]
 
     print(f"Using weights from {weights_path}")
-    state = torch.load(weights_path)
+    state = torch.load(weights_path, map_location=device)
     model.load_state_dict(state)
 
     data_path = Path(__file__).parent.parent / "data" / "free_atom_s_only"
@@ -143,8 +168,11 @@ def main():
             y_ml = model(data.to(device)) * mask.to(device)
 
             atom_pos = data["pos_orig"].cpu().numpy()
+            atom_types = data["z"][:, 0].int().cpu().numpy()
             x, y, z, origin = generate_grid(atom_pos, spacing=density_spacing, buffer=grid_buffer)
-            target_density, ml_density = gau2grid_density_kdtree(x.flatten(), y.flatten(), z.flatten(), data, y_ml, Rs, ldepb=False)
+            target_density, ml_density = gau2grid_density_kdtree(
+                x.flatten(), y.flatten(), z.flatten(), data, y_ml, params["Rs"], ldepb=False
+            )
 
             target_density = target_density.reshape(x.shape)
             ml_density = ml_density.reshape(x.shape)
@@ -152,9 +180,20 @@ def main():
             density_diff_rel = density_diff / target_density
             density_diff_rel[target_density < 1e-4] = 0
 
-            atom_pos -= origin
-            atom_types = data["z"][:, 0].int().cpu().numpy()
+            ml_coeffs = complete_coefficients(data, y_ml, params["Rs"])
+            for coeffs, file_name in [(ml_coeffs, "prediction"), (data.full_c.cpu().numpy(), "target")]:
+                sample = {
+                    "atom_pos": atom_pos,
+                    "atom_types": atom_types,
+                    "coeffs": coeffs,
+                    "norm": data.norm.cpu().numpy(),
+                    "exp": data.exp.cpu().numpy(),
+                    "basis_ls": params["Rs"],
+                }
+                with open(out_dir / f"{step}_{file_name}_coeffs.pickle", "wb") as f:
+                    pickle.dump(sample, f)
 
+            atom_pos -= origin
             save_to_xsf(out_dir / f"{step}_target.xsf", atom_pos, atom_types, target_density, density_spacing)
             save_to_xsf(out_dir / f"{step}_prediction.xsf", atom_pos, atom_types, ml_density, density_spacing)
             save_to_xsf(out_dir / f"{step}_diff.xsf", atom_pos, atom_types, density_diff, density_spacing)
