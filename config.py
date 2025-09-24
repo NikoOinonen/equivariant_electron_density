@@ -1,0 +1,158 @@
+import argparse
+import os
+from abc import ABC, abstractmethod
+from dataclasses import asdict, dataclass, fields
+from pathlib import Path
+from typing import Self
+
+
+@dataclass
+class RunConfig(ABC):
+    world_size: int
+    global_rank: int
+    local_rank: int
+
+    @classmethod
+    @abstractmethod
+    def get_args(cls):
+        pass
+
+    @classmethod
+    def from_cmd_args(cls) -> Self:
+        args = vars(cls.get_args())
+        args["world_size"] = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
+        args["global_rank"] = int(os.environ["RANK"]) if "RANK" in os.environ else 0
+        args["local_rank"] = int(os.environ["LOCAL_RANK"]) if "LOCAL_RANK" in os.environ else 0
+        return cls(**args)
+
+    @classmethod
+    def from_dict(cls, config_dict: dict) -> Self:
+        field_names = [field.name for field in fields(cls)]
+        for field in field_names:
+            if field not in config_dict:
+                raise ValueError(f"Field {field} not found in config dict.")
+        for key in list(config_dict.keys()):
+            if key not in field_names:
+                del config_dict[key]
+        for field in fields(cls):
+            if field.type == Path and config_dict[field.name] is not None:
+                config_dict[field.name] = Path(config_dict[field.name])
+        return cls(**config_dict)
+
+    def into_json_dict(self) -> dict:
+        config_dict = asdict(self)
+        # These are not JSON serializable, so convert them to str
+        for key in config_dict:
+            if isinstance(config_dict[key], Path):
+                config_dict[key] = str(config_dict[key])
+        return config_dict
+
+
+@dataclass
+class TrainConfig(RunConfig):
+    run_dir: Path
+    base_model: Path
+    dataset: Path
+    testset: Path
+    train_samples: int
+    test_samples: int
+    num_epochs: int
+    test_interval: int
+    batch_average: int
+    lr: float
+    lr_warm: int
+    lr_decay: float
+    irreps_hidden: str
+    correlation_order: int
+    num_layers: int
+    include_elements: list[int]
+    exclude_elements: list[int]
+
+    @classmethod
+    def get_args(cls):
+        parser = argparse.ArgumentParser(description="Train model")
+        parser.add_argument(
+            "--run_dir",
+            type=Path,
+            help="Directory for training or testing. Created automatically during training if not specified.",
+        )
+        parser.add_argument("--base_model", type=Path, help="Directory of model used as starting point for fine tuning")
+        parser.add_argument("--dataset", type=Path, help="Path to training dataset")
+        parser.add_argument("--testset", type=Path, help="Path to test dataset")
+        parser.add_argument(
+            "--train_samples", type=int, default=None, help="Number of samples to take from the training set."
+        )
+        parser.add_argument(
+            "--test_samples", type=int, default=None, help="Number of samples to take from the test set."
+        )
+        parser.add_argument("--num_epochs", type=int, default=10, help="Number of epochs to train the model.")
+        parser.add_argument("--test_interval", type=int, default=1, help="Number of epochs between test evaluations.")
+        parser.add_argument(
+            "--batch_average",
+            type=int,
+            default=1,
+            help="Number of batches to average over per GPU between gradient steps.",
+        )
+        parser.add_argument("--lr", type=float, default=1e-3, help="Base learning rate for optimization.")
+        parser.add_argument("--lr_warm", type=int, default=4000, help="Number of steps for learning rate warmup.")
+        parser.add_argument("--lr_decay", type=float, default=10000, help="Number of batches for learning rate decay.")
+        parser.add_argument(
+            "--irreps_hidden", type=str, default="128x0e+128x1o", help="Number of irreps in equivariant layers."
+        )
+        parser.add_argument("--correlation_order", type=int, default=3, help="MACE layer correlation order.")
+        parser.add_argument("--num_layers", type=int, default=3, help="Number of convolution layer.")
+        parser.add_argument(
+            "--include_elements",
+            type=int,
+            default=None,
+            nargs="*",
+            help="Only take samples that include at least one of the elements with listed atomic numbers.",
+        )
+        parser.add_argument(
+            "--exclude_elements",
+            type=int,
+            default=None,
+            nargs="*",
+            help="Only take samples that do not include any of the elements with listed atomic numbers.",
+        )
+        return parser.parse_args()
+
+
+@dataclass
+class TestConfig(RunConfig):
+    run_dir: Path
+    testsets: list[Path]
+    test_samples: int
+    include_elements: list[int]
+    exclude_elements: list[int]
+    weights_epoch: int
+
+    @classmethod
+    def get_args(cls):
+        parser = argparse.ArgumentParser(description="Test model")
+        parser.add_argument(
+            "--run_dir",
+            type=Path,
+            help="Directory for training or testing. Created automatically during training if not specified.",
+        )
+        parser.add_argument("--testsets", type=Path, nargs="+", help="Path to test dataset")
+        parser.add_argument(
+            "--test_samples", type=int, default=None, help="Number of samples to take from the test set."
+        )
+        parser.add_argument(
+            "--include_elements",
+            type=int,
+            default=None,
+            nargs="*",
+            help="Only take samples that include at least one of the elements with listed atomic numbers.",
+        )
+        parser.add_argument(
+            "--exclude_elements",
+            type=int,
+            default=None,
+            nargs="*",
+            help="Only take samples that do not include any of the elements with listed atomic numbers.",
+        )
+        parser.add_argument("--weights_epoch", type=int, default=None, help="Epoch to load weights from.")
+        return parser.parse_args()
+

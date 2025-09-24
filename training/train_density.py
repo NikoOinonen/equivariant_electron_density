@@ -1,68 +1,54 @@
-import argparse
+import json
 import math
 import os
-import pickle
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch_geometric
 from torch.nn.parallel import DistributedDataParallel
 from torch.optim import Adam, lr_scheduler
 from torch.utils.tensorboard import SummaryWriter
+from torch_geometric.loader import DataLoader
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import TrainConfig
 from models import MaceNetwork
 from utils import get_iso_permuted_dataset, get_scalar_density_comparisons
 
 
-def get_args():
+def get_dataloader(
+    data_path: Path,
+    free_atom_densities: dict[int, Path],
+    Rs: list[tuple[int, int]],
+    exclude_elements: list[int],
+    include_elements: list[int],
+    num_samples: int,
+    world_size: int,
+    global_rank: int,
+) -> DataLoader:
 
-    parser = argparse.ArgumentParser(description="train electron density")
-    parser.add_argument("--dataset", type=str)
-    parser.add_argument("--testset", type=str)
-    parser.add_argument("--train_split", type=int)
-    parser.add_argument("--test_split", type=int)
-    parser.add_argument("--epochs", type=int, default=300)
-    parser.add_argument("--test_epochs", type=int, default=1)
-    parser.add_argument("--batch_average", type=int, default=1)
-    parser.add_argument("--learning_rate", type=float, default=1e-2)
-    parser.add_argument("--lr_warmup_batches", type=float, default=4000)
-    parser.add_argument("--lr_decay_batches", type=float, default=10000)
-    parser.add_argument("--irreps_hidden", type=str, default="64-64-64")
-    parser.add_argument("--correlation_order", type=int, default=3)
-    parser.add_argument("--num_layers", type=int, default=3)
-    parser.add_argument("--free_density_input", type=bool, default=False)
-    parser.add_argument("--exclude_elements", type=str)
-    parser.add_argument("--continue_run", type=str)
-    parser.add_argument("--run_comment", type=str, default="")
-    parser.add_argument("--ldep", type=bool, default=False)
-    args = parser.parse_args()
+    dataset = get_iso_permuted_dataset(
+        data_path,
+        free_atom_densities,
+        free_density_input=True,
+        Rs=Rs,
+        exclude_elements=exclude_elements,
+        include_elements=include_elements,
+    )
 
-    if "WORLD_SIZE" in os.environ:
-        args.world_size = int(os.environ["WORLD_SIZE"])
-        args.global_rank = int(os.environ["RANK"])
-        args.local_rank = int(os.environ["LOCAL_RANK"])
-
-    return args
-
-
-def get_dataloader(data_path, free_atom_densities, free_density_input, Rs, exclude_elements, split, world_size, global_rank):
-
-    dataset = get_iso_permuted_dataset(data_path, free_atom_densities, free_density_input, Rs, exclude_elements)
-
-    if split is None:
-        split = len(dataset)
-    elif split > len(dataset):
+    if num_samples is None:
+        num_samples = len(dataset)
+    elif num_samples > len(dataset):
         raise ValueError("Split is too large for the dataset.")
 
-    chunk = math.floor(split / world_size)
-
-    loader = torch_geometric.data.DataLoader(
+    chunk = math.floor(num_samples / world_size)
+    loader = DataLoader(
         dataset[global_rank * chunk : (global_rank + 1) * chunk],
         batch_size=1,
         shuffle=True,
@@ -71,7 +57,7 @@ def get_dataloader(data_path, free_atom_densities, free_density_input, Rs, exclu
     return loader
 
 
-def lossPerChannel(y_ml, y_target, Rs=[(12, 0), (5, 1), (4, 2), (2, 3), (1, 4)]):
+def lossPerChannel(y_ml: torch.Tensor, y_target: torch.Tensor, Rs: list[tuple[int, int]]) -> np.ndarray:
 
     err = y_ml - y_target
     loss_perChannel_list = np.zeros(len(Rs))
@@ -91,7 +77,7 @@ def lossPerChannel(y_ml, y_target, Rs=[(12, 0), (5, 1), (4, 2), (2, 3), (1, 4)])
     return loss_perChannel_list
 
 
-def lr_schedule(i_batch, lr_init=1e-10, T_warm=1000, T_decay=10000):
+def lr_schedule(i_batch: int, lr_init: float = 1e-10, T_warm: int = 1000, T_decay: float = 10000) -> float:
     if i_batch <= T_warm:
         lr = lr_init + (1 - lr_init) * (i_batch / T_warm)
     else:
@@ -99,7 +85,7 @@ def lr_schedule(i_batch, lr_init=1e-10, T_warm=1000, T_decay=10000):
     return lr
 
 
-def average_across_ranks(val, device, world_size):
+def average_across_ranks(val: Any, device: str | int | torch.device, world_size: int) -> np.ndarray:
     val = torch.tensor(val).to(device)
     dist.all_reduce(val, dist.ReduceOp.SUM)
     val = val.cpu().numpy()
@@ -107,63 +93,41 @@ def average_across_ranks(val, device, world_size):
     return val
 
 
-def main(args):
+def main():
 
     # Initialize the distributed environment.
     dist.init_process_group("nccl")
-
     torch.set_default_dtype(torch.float32)
+
+    config = TrainConfig.from_cmd_args()
 
     # def2 basis set max irreps
     # WARNING. this is currently hard-coded for def2_universal
     Rs = [(19, 0), (5, 1), (5, 2), (3, 3), (1, 4)]
 
-    train_split = args.train_split
-    test_split = args.test_split
-    train_data_path = Path(args.dataset)
-    test_data_path = Path(args.testset)
-    num_epochs = args.epochs
-    test_epochs = args.test_epochs
-    batch_average = args.batch_average
-    ldep_bool = args.ldep
-
-    local_rank = args.local_rank
-    global_rank = args.global_rank
-    world_size = args.world_size
-    device = local_rank
-
-    lr = args.learning_rate
-    lr_warm = int(args.lr_warmup_batches)
-    lr_decay = int(args.lr_decay_batches)
-
     # The MACE layers only work with alternating parities for the irreps: https://github.com/ACEsuit/mace/discussions/42
-    parity = [1, -1]
-    irreps_hidden = [(int(channels), (l, parity[l % 2])) for l, channels in enumerate(args.irreps_hidden.split("-"))]
-    irreps_out = [(channels, (l, parity[l % 2])) for channels, l in Rs]
+    parity = ["e", "o"]
+    irreps_hidden = "+".join(
+        [f"{channels}x{l}{parity[l % 2]}" for l, channels in enumerate(config.irreps_hidden.split("-"))]
+    )
+    irreps_out = "+".join([f"{channels}x{l}{parity[l % 2]}" for channels, l in Rs])
 
     # https://github.com/ACEsuit/mace/issues/63
-    assert len(set(c for c, _ in irreps_hidden)) == 1, "Hidden irreps must have the same number of channels for all l-orders."
+    assert (
+        len(set(c for c in config.irreps_hidden.split("-"))) == 1
+    ), "Hidden irreps must have the same number of channels for all l-orders."
 
-    max_l_edges = len(irreps_hidden) - 1
-    message_correlation_order = args.correlation_order
-    num_layers = args.num_layers
-    free_density_input = args.free_density_input
-    input_shape = Rs[0][0] if free_density_input else 10
-
-    exclude_elements = args.exclude_elements
-    if exclude_elements:
-        exclude_elements = [int(v) for v in exclude_elements.split("-")]
-
+    input_shape = Rs[0][0]  # Input is l=0 components of free densities
     density_spacing = 0.25
-    print_interval = 500
+
     model_kwargs = {
         "irreps_in": f"{input_shape}x0e",
         "irreps_hidden": irreps_hidden,
         "irreps_out": irreps_out,  # = Rs
         "node_attr_dim": None,
-        "max_l_edges": max_l_edges,
-        "message_correlation_order": message_correlation_order,
-        "layers": num_layers,
+        "max_l_edges": len(config.irreps_hidden.split("-")) - 1,
+        "message_correlation_order": config.correlation_order,
+        "layers": config.num_layers,
         "max_radius": 3.5,
         "number_of_basis": 10,
         "num_neighbors": 12.2298,
@@ -171,8 +135,11 @@ def main(args):
         "reduce_output": False,
     }
 
-    print(f"Starting on global rank {global_rank}, local rank {local_rank}. World size {world_size}\n", flush=True)
-    if global_rank == 0:
+    print(
+        f"Starting on global rank {config.global_rank}, local rank {config.local_rank}. World size {config.world_size}\n",
+        flush=True,
+    )
+    if config.global_rank == 0:
         print(f"Model kwargs: {model_kwargs}")
 
     free_atom_data_path = Path(__file__).parent.parent / "data" / "free_atom_s_only"
@@ -189,143 +156,138 @@ def main(args):
         35: free_atom_data_path / "Br_def2-universal-jfit-decon_density.out",
     }
 
-    if global_rank == 0:
+    if config.global_rank == 0:
         print("Loading datasets...")
     train_loader = get_dataloader(
-        train_data_path,
-        free_atom_densities,
-        free_density_input,
-        Rs,
-        exclude_elements,
-        train_split,
-        world_size,
-        global_rank,
+        data_path=config.dataset,
+        free_atom_densities=free_atom_densities,
+        Rs=Rs,
+        exclude_elements=config.exclude_elements,
+        include_elements=config.include_elements,
+        num_samples=config.train_samples,
+        world_size=config.world_size,
+        global_rank=config.global_rank,
     )
     test_loader = get_dataloader(
-        test_data_path,
-        free_atom_densities,
-        free_density_input,
-        Rs,
-        exclude_elements,
-        test_split,
-        world_size,
-        global_rank,
+        data_path=config.testset,
+        free_atom_densities=free_atom_densities,
+        Rs=Rs,
+        exclude_elements=config.exclude_elements,
+        include_elements=config.include_elements,
+        num_samples=config.test_samples,
+        world_size=config.world_size,
+        global_rank=config.global_rank,
     )
 
     model = MaceNetwork(**model_kwargs)
-    model.to(device)
+    model.to(config.local_rank)
 
-    optim = Adam(model.parameters(), lr=lr)
+    optim = Adam(model.parameters(), lr=config.lr)
     optim.zero_grad()
 
-    scheduler = lr_scheduler.LambdaLR(optim, lambda nb: lr_schedule(nb, T_warm=lr_warm, T_decay=lr_decay))
+    scheduler = lr_scheduler.LambdaLR(optim, lambda nb: lr_schedule(nb, T_warm=config.lr_warm, T_decay=config.lr_decay))
 
-    if global_rank == 0:
-        print(f"Number of parameters:", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    if config.run_dir:
 
-    if args.continue_run:
-
-        run_dir = Path(args.continue_run)
-        if not run_dir.exists():
-            if global_rank == 0:
-                print(f"No existing run directory at {run_dir}")
+        if not config.run_dir.exists():
+            if config.global_rank == 0:
+                print(f"No existing run directory at {config.run_dir}")
             sys.exit(1)
 
-        if global_rank == 0:
-            writer = SummaryWriter(log_dir=run_dir)
-
         # Load weights
-        weights_paths = list(run_dir.glob("model_weights_epoch_*.pt"))
+        weights_paths = list(config.run_dir.glob("model_weights_epoch_*.pt"))
         if not weights_paths:
-            print(f"No weights found in {run_dir}.")
+            print(f"No weights found in {config.run_dir}.")
             sys.exit(1)
         weights_paths = sorted(weights_paths, key=lambda p: int(p.name.split("_")[-1].split(".")[0]))
         weights_path = weights_paths[-1]
-        state = torch.load(weights_path, map_location={"cuda:0": f"cuda:{local_rank}"})
+        state = torch.load(weights_path, map_location={"cuda:0": f"cuda:{config.local_rank}"})
         model.load_state_dict(state)
 
         epoch_num = int(weights_path.name.split("_")[-1].split(".")[0])
-        optimizer_state = torch.load(run_dir / f"optimizer_epoch_{epoch_num}.pt", map_location={"cuda:0": f"cuda:{local_rank}"})
+        optimizer_state = torch.load(
+            config.run_dir / f"optimizer_epoch_{epoch_num}.pt", map_location={"cuda:0": f"cuda:{config.local_rank}"}
+        )
         optim.load_state_dict(optimizer_state["optimizer"])
         scheduler.load_state_dict(optimizer_state["scheduler"])
 
-        if global_rank == 0:
+        if config.global_rank == 0:
             print(f"Continuing training using weights from {weights_path}")
 
         epoch_start = int(weights_path.name.split("_")[-1].split(".")[0])
-        i_batch = epoch_start * len(train_loader) // batch_average
+        i_batch = epoch_start * len(train_loader) // config.batch_average
 
     else:
-
-        if global_rank == 0:
-            comment = f"_{args.run_comment}" if args.run_comment else ""
-            writer = SummaryWriter(comment=comment)
-            run_dir = Path(writer.get_logdir())
-
         epoch_start = 0
         i_batch = 1
 
-    model = DistributedDataParallel(model, device_ids=[device])
+    model = DistributedDataParallel(model, device_ids=[config.local_rank])
 
-    if global_rank == 0:
+    if config.global_rank == 0:
 
-        print(f"Saving log to {run_dir}")
+        print(f"Number of parameters:", sum(p.numel() for p in model.parameters() if p.requires_grad))
+
+        if not config.run_dir:
+            config.run_dir = Path("runs") / (
+                f"{datetime.now().strftime('%y%m%d-%H%M%S')}"
+                f"_bs{config.world_size * config.batch_average}"
+                f"_ns{len(train_loader) * config.world_size}"
+                f"_lr{config.lr:.1e}-{config.lr_warm}-{config.lr_decay:.1e}"
+                f"_irreps{config.irreps_hidden}x{config.num_layers}"
+                f"_corr{config.correlation_order}"
+                f"_exc{'-'.join(str(e) for e in config.exclude_elements)}"
+                if config.exclude_elements
+                else "" f"_inc{'-'.join(str(e) for e in config.include_elements)}" if config.include_elements else ""
+            )
+        writer = SummaryWriter(str(config.run_dir))
+
+        print(f"Saving log to {config.run_dir}")
 
         # Dump run information to run directory
-        with open(run_dir / "run_data.pickle", "wb") as f:
-            run_data = model_kwargs | {
-                "train_data_path": train_data_path.resolve(),
-                "train_dataset_size": train_split,
-                "test_data_path": test_data_path.resolve(),
-                "test_dataset_size": test_split,
-                "batch_average": batch_average,
-                "lr": lr,
-                "lr_warm": lr_warm,
-                "lr_decay": lr_decay,
+        with open(config.run_dir / "run_data.json", "w") as f:
+            run_data = config.into_json_dict() | {
+                "model_kwargs": model_kwargs,
                 "density_spacing": density_spacing,
                 "Rs": Rs,
                 "job_id": os.environ["SLURM_JOB_ID"],
                 "job_name": os.environ["SLURM_JOB_NAME"],
-                "free_density_input": free_density_input,
             }
-            pickle.dump(run_data, f)
-        with open(run_dir / "environment.yaml", "w") as f:
+            f.write(json.dumps(run_data, indent=2))
+        with open(config.run_dir / "environment.yaml", "w") as f:
             subprocess.run(["conda", "env", "export"], stdout=f)
 
     loss_cum = 0.0
-    loss_perchannel_cum = np.zeros(len(Rs))
-    mae_cum = 0.0
-    mue_cum = 0.0
+    loss_per_channel = np.zeros(len(Rs))
+    mae = 0.0
+    mue = 0.0
+    print_interval = min(500, len(train_loader) / config.batch_average)
 
-    for epoch in range(epoch_start, num_epochs):
+    for epoch in range(epoch_start, config.num_epochs):
 
         t0_train = time.perf_counter()
 
-        if global_rank == 0:
+        if config.global_rank == 0:
             print(f"Epoch {epoch + 1} Train")
 
         for step, data in enumerate(train_loader):
 
             mask = torch.where(data.y == 0, torch.zeros_like(data.y), torch.ones_like(data.y)).detach()
-            data = data.to(device)
-            y_ml = model(data) * mask.to(device)
-            loss = (y_ml - data.y).pow(2).mean() / batch_average
+            data = data.to(config.local_rank)
+            y_ml = model(data) * mask.to(config.local_rank)
+            loss = (y_ml - data.y).pow(2).mean() / config.batch_average
             loss.backward()
 
             for mul, l in Rs:
                 if l == 0:
                     num_ele = sum(sum(y_ml[:, :mul])).detach()
 
-            mue_cum += num_ele / batch_average
-            mae_cum += abs(num_ele) / batch_average
+            mue += num_ele / config.batch_average
+            mae += abs(num_ele) / config.batch_average
 
-            # compute loss per channel
-            if ldep_bool:
-                loss_perchannel_cum += lossPerChannel(y_ml, data.y, Rs) / batch_average
-
+            loss_per_channel += lossPerChannel(y_ml, data.y, Rs) / config.batch_average
             loss_cum += loss.detach()
 
-            if (step + 1) % batch_average == 0 or (step + 1) == len(train_loader):
+            if (step + 1) % config.batch_average == 0 or (step + 1) == len(train_loader):
 
                 optim.step()
                 optim.zero_grad()
@@ -334,103 +296,98 @@ def main(args):
                 if i_batch % print_interval == 0:
 
                     # Take an average of the loss value across parallel ranks
-                    loss_cum = average_across_ranks(loss_cum, device, world_size)
-                    loss_perchannel_cum = average_across_ranks(loss_perchannel_cum, device, world_size)
-                    mae_cum = average_across_ranks(mae_cum, device, world_size)
-                    mue_cum = average_across_ranks(mue_cum, device, world_size)
+                    loss_cum = average_across_ranks(loss_cum, config.local_rank, config.world_size)
+                    loss_per_channel = average_across_ranks(loss_per_channel, config.local_rank, config.world_size)
+                    mae = average_across_ranks(mae, config.local_rank, config.world_size)
+                    mue = average_across_ranks(mue, config.local_rank, config.world_size)
 
-                    if global_rank == 0:
+                    if config.global_rank == 0:
 
                         print(f"Epoch {epoch + 1}, Train {step + 1}/{len(train_loader)}")
 
                         writer.add_scalar("Loss/Train", float(loss_cum) / print_interval, i_batch)
-                        writer.add_scalar("Loss/Train l=0", float(loss_perchannel_cum[0]) / print_interval, i_batch)
-                        writer.add_scalar("Loss/Train l=1", float(loss_perchannel_cum[1]) / print_interval, i_batch)
-                        writer.add_scalar("Loss/Train l=2", float(loss_perchannel_cum[2]) / print_interval, i_batch)
-                        writer.add_scalar("Loss/Train l=3", float(loss_perchannel_cum[3]) / print_interval, i_batch)
-                        writer.add_scalar("Loss/Train l=4", float(loss_perchannel_cum[4]) / print_interval, i_batch)
-                        writer.add_scalar("Metrics/Train_MAE", mae_cum / print_interval, i_batch)
-                        writer.add_scalar("Metrics/Train_MUE", mue_cum / print_interval, i_batch)
+                        writer.add_scalar("Loss/Train l=0", float(loss_per_channel[0]) / print_interval, i_batch)
+                        writer.add_scalar("Loss/Train l=1", float(loss_per_channel[1]) / print_interval, i_batch)
+                        writer.add_scalar("Loss/Train l=2", float(loss_per_channel[2]) / print_interval, i_batch)
+                        writer.add_scalar("Loss/Train l=3", float(loss_per_channel[3]) / print_interval, i_batch)
+                        writer.add_scalar("Loss/Train l=4", float(loss_per_channel[4]) / print_interval, i_batch)
+                        writer.add_scalar("Metrics/Train_MAE", mae / print_interval, i_batch)
+                        writer.add_scalar("Metrics/Train_MUE", mue / print_interval, i_batch)
                         writer.add_scalar("Other/Learning rate", scheduler.get_last_lr()[0], i_batch)
                         writer.flush()
 
                     loss_cum = 0.0
-                    loss_perchannel_cum = np.zeros(len(Rs))
-                    mae_cum = 0.0
-                    mue_cum = 0.0
+                    loss_per_channel = np.zeros(len(Rs))
+                    mae = 0.0
+                    mue = 0.0
 
                 i_batch += 1
 
-        if global_rank == 0:
+        if config.global_rank == 0:
             print(f"Train time: {time.perf_counter() - t0_train}")
 
-        # Only test every test_epochs and on last epoch
-        if epoch % test_epochs != 0 and epoch != (num_epochs - 1):
+        # Only test at intervals and on the last epoch
+        if epoch % config.test_interval != 0 and epoch != (config.num_epochs - 1):
             continue
 
-        if global_rank == 0:
+        if config.global_rank == 0:
             print(f"Epoch {epoch + 1} Test")
             t0_test = time.perf_counter()
 
         with torch.no_grad():
-            test_loss_cum = 0.0
-            test_mae_cum = 0.0
-            test_mue_cum = 0.0
-            bigIs_cum = 0.0
-            eps_cum = 0.0
-            ep_per_l_cum = np.zeros(len(Rs))
-            ele_diff_cum = 0.0
+            test_loss = 0.0
+            test_mae = 0.0
+            test_mue = 0.0
+            bigIs = 0.0
+            eps = 0.0
+            ep_per_l = np.zeros(len(Rs))
+            ele_diff = 0.0
             for step, data in enumerate(test_loader):
 
-                if global_rank == 0 and (step + 1) % print_interval == 0:
+                if config.global_rank == 0 and (step + 1) % print_interval == 0:
                     print(f"Epoch {epoch + 1}, Test {step + 1}/{len(test_loader)}")
 
                 mask = torch.where(data.y == 0, torch.zeros_like(data.y), torch.ones_like(data.y)).detach()
-                y_ml = model(data.to(device)) * mask.to(device)
+                y_ml = model(data.to(config.local_rank)) * mask.to(config.local_rank)
                 loss = (y_ml - data.y).pow(2).mean()
 
                 for mul, l in Rs:
                     if l == 0:
                         num_ele = torch.mean(y_ml[:, :mul]).detach()
 
-                test_mue_cum += num_ele
-                test_mae_cum += abs(num_ele)
-                test_loss_cum += loss.detach()
+                test_mue += num_ele
+                test_mae += abs(num_ele)
+                test_loss += loss.detach()
 
-                if ldep_bool:
-                    num_ele_target, _, bigI, ep, ep_per_l = get_scalar_density_comparisons(
-                        data, y_ml, Rs, spacing=density_spacing, buffer=3.0, ldep=ldep_bool
-                    )
-                    ep_per_l_cum += ep_per_l
-                else:
-                    num_ele_target, _, bigI, ep = get_scalar_density_comparisons(
-                        data, y_ml, Rs, spacing=density_spacing, buffer=3.0, ldep=ldep_bool
-                    )
+                num_ele_target, _, bigI, ep, ep_per_l_ = get_scalar_density_comparisons(
+                    data, y_ml, Rs, spacing=density_spacing, buffer=3.0, ldep=True
+                )
+                ep_per_l += ep_per_l_
 
                 n_ele = np.sum(data.z.cpu().detach().numpy())
-                ele_diff_cum += np.abs(n_ele - num_ele_target)
-                bigIs_cum += bigI
-                eps_cum += ep
+                ele_diff += np.abs(n_ele - num_ele_target)
+                bigIs += bigI
+                eps += ep
 
-        test_loss_cum = average_across_ranks(test_loss_cum, device, world_size)
-        test_mae_cum = average_across_ranks(test_mae_cum, device, world_size)
-        test_mue_cum = average_across_ranks(test_mue_cum, device, world_size)
-        bigIs_cum = average_across_ranks(bigIs_cum, device, world_size)
-        eps_cum = average_across_ranks(eps_cum, device, world_size)
-        ep_per_l_cum = average_across_ranks(ep_per_l_cum, device, world_size)
-        ele_diff_cum = average_across_ranks(ele_diff_cum, device, world_size)
+        test_loss = average_across_ranks(test_loss, config.local_rank, config.world_size)
+        test_mae = average_across_ranks(test_mae, config.local_rank, config.world_size)
+        test_mue = average_across_ranks(test_mue, config.local_rank, config.world_size)
+        bigIs = average_across_ranks(bigIs, config.local_rank, config.world_size)
+        eps = average_across_ranks(eps, config.local_rank, config.world_size)
+        ep_per_l = average_across_ranks(ep_per_l, config.local_rank, config.world_size)
+        ele_diff = average_across_ranks(ele_diff, config.local_rank, config.world_size)
 
-        if global_rank == 0:
+        if config.global_rank == 0:
 
             print(f"Test time: {time.perf_counter() - t0_test}")
 
             # Save model
-            save_path = run_dir / f"model_weights_epoch_{epoch + 1}.pt"
+            save_path = config.run_dir / f"model_weights_epoch_{epoch + 1}.pt"
             torch.save(model.module.state_dict(), save_path)
             print(f"Saved model weights on epoch {epoch + 1} to {save_path}.")
 
             # Save optimizer state
-            save_path = run_dir / f"optimizer_epoch_{epoch + 1}.pt"
+            save_path = config.run_dir / f"optimizer_epoch_{epoch + 1}.pt"
             torch.save(
                 {
                     "optimizer": optim.state_dict(),
@@ -441,24 +398,23 @@ def main(args):
             print(f"Saved optimizer state on epoch {epoch + 1} to {save_path}.")
 
             # eps per l and loss per l hard coded for def2 below
-            writer.add_scalar("Loss/Test", float(test_loss_cum) / len(test_loader), i_batch)
-            writer.add_scalar("Metrics/Test_MAE", test_mae_cum / len(test_loader), i_batch)
-            writer.add_scalar("Metrics/Test_MUE", test_mue_cum / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_Electron_Difference", ele_diff_cum / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_big_I", bigIs_cum / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_Epsilon", eps_cum / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_Epsilon l=0", ep_per_l_cum[0] / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_Epsilon l=1", ep_per_l_cum[1] / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_Epsilon l=2", ep_per_l_cum[2] / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_Epsilon l=3", ep_per_l_cum[3] / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_Epsilon l=4", ep_per_l_cum[4] / len(test_loader), i_batch)
+            writer.add_scalar("Loss/Test", float(test_loss) / len(test_loader), i_batch)
+            writer.add_scalar("Metrics/Test_MAE", test_mae / len(test_loader), i_batch)
+            writer.add_scalar("Metrics/Test_MUE", test_mue / len(test_loader), i_batch)
+            writer.add_scalar("Other/Test_Electron_Difference", ele_diff / len(test_loader), i_batch)
+            writer.add_scalar("Other/Test_big_I", bigIs / len(test_loader), i_batch)
+            writer.add_scalar("Other/Test_Epsilon", eps / len(test_loader), i_batch)
+            writer.add_scalar("Other/Test_Epsilon l=0", ep_per_l[0] / len(test_loader), i_batch)
+            writer.add_scalar("Other/Test_Epsilon l=1", ep_per_l[1] / len(test_loader), i_batch)
+            writer.add_scalar("Other/Test_Epsilon l=2", ep_per_l[2] / len(test_loader), i_batch)
+            writer.add_scalar("Other/Test_Epsilon l=3", ep_per_l[3] / len(test_loader), i_batch)
+            writer.add_scalar("Other/Test_Epsilon l=4", ep_per_l[4] / len(test_loader), i_batch)
             writer.add_scalar("Other/Epoch", epoch + 1, i_batch)
             writer.flush()
 
-    if global_rank == 0:
+    if config.global_rank == 0:
         writer.close()
 
 
 if __name__ == "__main__":
-    args = get_args()
-    main(args)
+    main()

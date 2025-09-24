@@ -1,4 +1,6 @@
 import argparse
+from datetime import datetime
+import json
 import os
 import pickle
 import sys
@@ -9,13 +11,11 @@ import torch
 import torch_geometric
 from ase import Atoms
 from ase.io.xsf import write_xsf
-from e3nn import o3
-
-# from e3nn.nn.models.gate_points_2101 import Network
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import gau2grid_density_kdtree, get_iso_permuted_dataset, find_min_max
+from config import TestConfig
 from models import MaceNetwork
+from utils import gau2grid_density_kdtree, get_iso_permuted_dataset
 
 
 def generate_grid(atom_pos: np.ndarray, spacing: float = 0.1, buffer: float = 2.0):
@@ -64,69 +64,32 @@ def complete_coefficients(data, ml_y, rs):
 
 def main():
 
-    parser = argparse.ArgumentParser(description="Predict on trained model")
-    parser.add_argument("--run_dir", type=str)
-    parser.add_argument("--out_dir", type=str)
-    parser.add_argument("--weights_epoch", type=int)
-    parser.add_argument("--dataset", type=str)
-    parser.add_argument("--include_elements", type=str)
-    parser.add_argument("--num_samples", type=int, default=5)
-    args = parser.parse_args()
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("What device am I using?", device)
 
     torch.set_default_dtype(torch.float32)
 
-    run_dir = Path(args.run_dir)
-    weights_epoch = args.weights_epoch
-    dataset_path = Path(args.dataset)
-    num_samples = args.num_samples
-    if args.out_dir:
-        out_dir = Path(args.out_dir)
-    else:
-        out_dir = run_dir / f"predictions_{dataset_path.stem}"
+    config = TestConfig.from_cmd_args()
+    with open(config.run_dir / "run_data.json") as f:
+        run_data = json.loads(f.read())
 
-    include_elements = args.include_elements
-    if include_elements is not None:
-        include_elements = [int(v) for v in include_elements.split("-")]
-
+    out_dir = config.run_dir / f"predictions_{datetime.now().strftime('%y%m%d-%H%M%S')}"
     density_spacing = 0.1
     grid_buffer = 3.0
+    Rs = run_data["Rs"]
 
-    with open(run_dir / "run_data.pickle", "rb") as f:
-        params = pickle.load(f)
-
-    model_kwargs = {
-        n: params[n]
-        for n in [
-            "irreps_in",
-            "irreps_hidden",
-            "irreps_out",
-            "node_attr_dim",
-            "max_l_edges",
-            "message_correlation_order",
-            "layers",
-            "max_radius",
-            "number_of_basis",
-            "num_neighbors",
-            "num_nodes",
-            "reduce_output",
-        ]
-    }
-
-    model = MaceNetwork(**model_kwargs)
+    model = MaceNetwork(**run_data["model_kwargs"])
     model.to(device)
 
-    if weights_epoch:
-        weights_path = run_dir / f"model_weights_epoch_{weights_epoch}.pt"
+    if config.weights_epoch:
+        weights_path = config.run_dir / f"model_weights_epoch_{config.weights_epoch}.pt"
         if not weights_path.exists():
-            print(f"Weights for epoch {weights_epoch} not found in {run_dir}.")
+            print(f"Weights for epoch {config.weights_epoch} not found in {config.run_dir}.")
             sys.exit(1)
     else:
-        weights_paths = list(run_dir.glob("model_weights_epoch_*.pt"))
+        weights_paths = list(config.run_dir.glob("model_weights_epoch_*.pt"))
         if not weights_paths:
-            print(f"No weights found in {run_dir}.")
+            print(f"No weights found in {config.run_dir}.")
             sys.exit(1)
         weights_paths = sorted(weights_paths, key=lambda p: int(p.name.split("_")[-1].split(".")[0]))
         weights_path = weights_paths[-1]
@@ -150,10 +113,19 @@ def main():
     }
 
     print("Loading test set")
-    dataset_path = get_iso_permuted_dataset(
-        dataset_path, free_atom_densities, params["free_density_input"], Rs, include_elements=include_elements
-    )
-    test_loader = torch_geometric.data.DataLoader(dataset_path[:num_samples], batch_size=1, shuffle=False)
+    dataset = []
+    for dataset_path in config.testsets:
+        dataset += get_iso_permuted_dataset(
+            dataset_path,
+            free_atom_densities,
+            free_density_input=True,
+            Rs=Rs,
+            exclude_elements=config.exclude_elements,
+            include_elements=config.include_elements,
+        )
+    if config.test_samples is None:
+        config.test_samples = 5
+    test_loader = torch_geometric.data.DataLoader(dataset[: config.test_samples], batch_size=1, shuffle=False)
 
     print(f"Saving predictions to {out_dir}")
     out_dir.mkdir(exist_ok=True)
@@ -171,7 +143,7 @@ def main():
             atom_types = data["z"][:, 0].int().cpu().numpy()
             x, y, z, origin = generate_grid(atom_pos, spacing=density_spacing, buffer=grid_buffer)
             target_density, ml_density = gau2grid_density_kdtree(
-                x.flatten(), y.flatten(), z.flatten(), data, y_ml, params["Rs"], ldepb=False
+                x.flatten(), y.flatten(), z.flatten(), data, y_ml, Rs, ldepb=False
             )
 
             target_density = target_density.reshape(x.shape)
@@ -180,7 +152,7 @@ def main():
             density_diff_rel = density_diff / target_density
             density_diff_rel[target_density < 1e-4] = 0
 
-            ml_coeffs = complete_coefficients(data, y_ml, params["Rs"])
+            ml_coeffs = complete_coefficients(data, y_ml, Rs)
             for coeffs, file_name in [(ml_coeffs, "prediction"), (data.full_c.cpu().numpy(), "target")]:
                 sample = {
                     "atom_pos": atom_pos,
@@ -188,7 +160,7 @@ def main():
                     "coeffs": coeffs,
                     "norm": data.norm.cpu().numpy(),
                     "exp": data.exp.cpu().numpy(),
-                    "basis_ls": params["Rs"],
+                    "basis_ls": Rs,
                 }
                 with open(out_dir / f"{step}_{file_name}_coeffs.pickle", "wb") as f:
                     pickle.dump(sample, f)

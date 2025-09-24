@@ -32,6 +32,7 @@ if __name__ == "__main__":
         "Sep11_14-58-56",
         "Sep16_15-35-19",
         "Sep18_06-47-12",
+        "Sep22_15-49-40",
     ]
 
     for run_time in run_times:
@@ -66,7 +67,7 @@ if __name__ == "__main__":
     ax1.set_xlabel("N_train")
     ax1.set_ylabel("Loss")
     ax2.set_xlabel("N_train")
-    ax2.set_xlabel("Error(%)")
+    ax2.set_ylabel("Error(%)")
     ax1.legend()
     ax2.legend()
 

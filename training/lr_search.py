@@ -4,14 +4,16 @@ from pathlib import Path
 
 import torch
 from torch.optim import Adam, lr_scheduler
-from train_density import get_args, get_dataloader
+from train_density import get_dataloader
+
+from config import TrainConfig
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models import MaceNetwork
 
 if __name__ == "__main__":
 
-    args = get_args()
+    config = TrainConfig.from_cmd_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("What device am I using?", device)
@@ -20,24 +22,22 @@ if __name__ == "__main__":
 
     Rs = [(19, 0), (5, 1), (5, 2), (3, 3), (1, 4)]
 
-    train_data_path = Path(args.dataset)
-    batch_average = args.batch_average
-
     # The MACE layers only work with alternating parities for the irreps: https://github.com/ACEsuit/mace/discussions/42
-    parity = [1, -1]
-    irreps_hidden = [(int(channels), (l, parity[l % 2])) for l, channels in enumerate(args.irreps_hidden.split("-"))]
-    irreps_out = [(channels, (l, parity[l % 2])) for channels, l in Rs]
+    parity = ["e", "o"]
+    irreps_hidden = "+".join(
+        [f"{channels}x{l}{parity[l % 2]}" for l, channels in enumerate(config.irreps_hidden.split("-"))]
+    )
+    irreps_out = "+".join([f"{channels}x{l}{parity[l % 2]}" for channels, l in Rs])
 
     # https://github.com/ACEsuit/mace/issues/63
-    assert len(set(c for c, _ in irreps_hidden)) == 1, "Hidden irreps must have the same number of channels for all l-orders."
+    assert (
+        len(set(c for c in config.irreps_hidden.split("-"))) == 1
+    ), "Hidden irreps must have the same number of channels for all l-orders."
 
     max_l_edges = len(irreps_hidden) - 1
-    message_correlation_order = args.correlation_order
-    num_layers = args.num_layers
-    free_density_input = args.free_density_input
-    input_shape = Rs[0][0] if free_density_input else 10
+    input_shape = Rs[0][0]
 
-    loss_log_path = Path(f"loss_log_lr_avg{batch_average}_{args.irreps_hidden}x{num_layers}.csv")
+    loss_log_path = Path(f"loss_log_lr_avg{config.batch_average}_{config.irreps_hidden}x{config.num_layers}.csv")
     with open(loss_log_path, "w") as f:
         f.write("i_batch,lr,loss\n")
 
@@ -46,15 +46,17 @@ if __name__ == "__main__":
         "irreps_hidden": irreps_hidden,
         "irreps_out": irreps_out,  # = Rs
         "node_attr_dim": None,
-        "max_l_edges": max_l_edges,
-        "message_correlation_order": message_correlation_order,
-        "layers": num_layers,
+        "max_l_edges": len(config.irreps_hidden.split("-")) - 1,
+        "message_correlation_order": config.correlation_order,
+        "layers": config.num_layers,
         "max_radius": 3.5,
         "number_of_basis": 10,
         "num_neighbors": 12.2298,
         "num_nodes": 26,
         "reduce_output": False,
     }
+
+    print(model_kwargs)
 
     free_atom_data_path = Path(__file__).parent.parent / "data" / "free_atom_s_only"
     free_atom_densities = {
@@ -72,12 +74,12 @@ if __name__ == "__main__":
 
     print("Loading train set")
     train_loader = get_dataloader(
-        train_data_path,
-        free_atom_densities,
-        free_density_input,
-        Rs,
-        exclude_elements=None,
-        split=None,
+        data_path=config.dataset,
+        free_atom_densities=free_atom_densities,
+        Rs=Rs,
+        exclude_elements=config.exclude_elements,
+        include_elements=config.include_elements,
+        num_samples=config.train_samples,
         world_size=1,
         global_rank=0,
     )
@@ -99,12 +101,12 @@ if __name__ == "__main__":
         output = model(data.to(device))
         y_ml = output * mask.to(device)
         err = y_ml - data.y.to(device)
-        loss = err.pow(2).mean() / batch_average
+        loss = err.pow(2).mean() / config.batch_average
 
         loss.backward()
         losses.append(loss.item())
 
-        if len(losses) == batch_average:
+        if len(losses) == config.batch_average:
 
             optim.step()
             optim.zero_grad()
