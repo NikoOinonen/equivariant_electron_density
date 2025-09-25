@@ -32,8 +32,8 @@ torchrun \
     --nproc_per_node $num_gpus \
     --max_restarts 0 \
     train_density.py \
-        --dataset ../generate_density_datasets/dataset_train.pickle \
-        --testset ../generate_density_datasets/dataset_val.pickle \
+        --dataset ../generate_density_datasets/data_list_ccsd-cid_train.json \
+        --testset ../generate_density_datasets/data_list_ccsd-cid_test.json \
         --num_epochs 40 \
         --test_interval 1 \
         --batch_average 2 \

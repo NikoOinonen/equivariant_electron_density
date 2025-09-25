@@ -27,7 +27,7 @@ def flatten_list(nested_list):
 
 
 def get_iso_permuted_dataset(
-    data_path: Path,
+    molecule_data: list[dict],
     free_atom_density_paths: dict[int, Path],
     free_density_input: bool = False,
     Rs: Optional[list[tuple[int, int]]] = None,
@@ -35,7 +35,6 @@ def get_iso_permuted_dataset(
     include_elements: Optional[list[int]] = None,
 ):
     import math
-    import pickle
     import torch
     import torch_geometric
     import copy
@@ -44,9 +43,6 @@ def get_iso_permuted_dataset(
     dataset = []
 
     isos = {atom_type: torch.Tensor(np.loadtxt(path, skiprows=2, usecols=1)) for atom_type, path in free_atom_density_paths.items()}
-
-    with open(data_path, "rb") as f:
-        molecule_data = pickle.load(f)
 
     for molecule in molecule_data:
         pos = molecule["pos"]

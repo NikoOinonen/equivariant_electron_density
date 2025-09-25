@@ -97,7 +97,7 @@ class TrainConfig(RunConfig):
         parser.add_argument("--lr_warm", type=int, default=4000, help="Number of steps for learning rate warmup.")
         parser.add_argument("--lr_decay", type=float, default=10000, help="Number of batches for learning rate decay.")
         parser.add_argument(
-            "--irreps_hidden", type=str, default="128x0e+128x1o", help="Number of irreps in equivariant layers."
+            "--irreps_hidden", type=str, default="128-128-128-128", help="Number of irreps in equivariant layers."
         )
         parser.add_argument("--correlation_order", type=int, default=3, help="MACE layer correlation order.")
         parser.add_argument("--num_layers", type=int, default=3, help="Number of convolution layer.")
@@ -121,7 +121,7 @@ class TrainConfig(RunConfig):
 @dataclass
 class TestConfig(RunConfig):
     run_dir: Path
-    testsets: list[Path]
+    testset: Path
     test_samples: int
     include_elements: list[int]
     exclude_elements: list[int]
@@ -135,7 +135,7 @@ class TestConfig(RunConfig):
             type=Path,
             help="Directory for training or testing. Created automatically during training if not specified.",
         )
-        parser.add_argument("--testsets", type=Path, nargs="+", help="Path to test dataset")
+        parser.add_argument("--testset", type=Path, nargs="+", help="Path to test dataset")
         parser.add_argument(
             "--test_samples", type=int, default=None, help="Number of samples to take from the test set."
         )

@@ -1,21 +1,20 @@
-import argparse
-from datetime import datetime
 import json
 import os
 import pickle
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import torch
-import torch_geometric
 from ase import Atoms
 from ase.io.xsf import write_xsf
+from train_density import get_dataloader
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import TestConfig
 from models import MaceNetwork
-from utils import gau2grid_density_kdtree, get_iso_permuted_dataset
+from utils import gau2grid_density_kdtree
 
 
 def generate_grid(atom_pos: np.ndarray, spacing: float = 0.1, buffer: float = 2.0):
@@ -113,19 +112,17 @@ def main():
     }
 
     print("Loading test set")
-    dataset = []
-    for dataset_path in config.testsets:
-        dataset += get_iso_permuted_dataset(
-            dataset_path,
-            free_atom_densities,
-            free_density_input=True,
-            Rs=Rs,
-            exclude_elements=config.exclude_elements,
-            include_elements=config.include_elements,
-        )
-    if config.test_samples is None:
-        config.test_samples = 5
-    test_loader = torch_geometric.data.DataLoader(dataset[: config.test_samples], batch_size=1, shuffle=False)
+    test_loader = get_dataloader(
+        data_path=config.testset,
+        free_atom_densities=free_atom_densities,
+        Rs=Rs,
+        exclude_elements=config.exclude_elements,
+        include_elements=config.include_elements,
+        num_samples=config.test_samples,
+        world_size=1,
+        global_rank=0,
+        shuffle=False,
+    )
 
     print(f"Saving predictions to {out_dir}")
     out_dir.mkdir(exist_ok=True)

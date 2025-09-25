@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import pickle
 import subprocess
 import sys
 import time
@@ -21,6 +22,15 @@ from config import TrainConfig
 from models import MaceNetwork
 from utils import get_iso_permuted_dataset, get_scalar_density_comparisons
 
+def load_dataset(data_list_path: Path) -> list[dict]:
+    with open(data_list_path) as f:
+        data_list = json.loads(f.read())
+    dataset = []
+    for dataset_path, cids in data_list.items():
+        with open(data_list_path.parent / dataset_path, "rb") as f:
+            data = pickle.load(f)
+        dataset += [data[cid] for cid in cids]
+    return dataset
 
 def get_dataloader(
     data_path: Path,
@@ -31,10 +41,12 @@ def get_dataloader(
     num_samples: int,
     world_size: int,
     global_rank: int,
+    shuffle: bool = False,
 ) -> DataLoader:
-
+    
+    dataset = load_dataset(data_path)
     dataset = get_iso_permuted_dataset(
-        data_path,
+        dataset,
         free_atom_densities,
         free_density_input=True,
         Rs=Rs,
@@ -51,7 +63,7 @@ def get_dataloader(
     loader = DataLoader(
         dataset[global_rank * chunk : (global_rank + 1) * chunk],
         batch_size=1,
-        shuffle=True,
+        shuffle=shuffle,
     )
 
     return loader
@@ -167,6 +179,7 @@ def main():
         num_samples=config.train_samples,
         world_size=config.world_size,
         global_rank=config.global_rank,
+        shuffle=True,
     )
     test_loader = get_dataloader(
         data_path=config.testset,
@@ -177,6 +190,7 @@ def main():
         num_samples=config.test_samples,
         world_size=config.world_size,
         global_rank=config.global_rank,
+        shuffle=False,
     )
 
     model = MaceNetwork(**model_kwargs)

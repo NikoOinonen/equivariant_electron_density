@@ -5,13 +5,14 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch_geometric
+from train_density import get_dataloader
 
 from config import TestConfig
 from models import MaceNetwork
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import get_iso_permuted_dataset, get_scalar_density_comparisons
+
+from utils import get_scalar_density_comparisons
 
 
 def main():
@@ -25,7 +26,7 @@ def main():
 
     torch.set_default_dtype(torch.float32)
 
-    print(f"Testing on dataset(s) {', '.join(str(p) for p in config.testsets)} using model from {config.run_dir}.")
+    print(f"Testing on dataset(s) {config.testset} using model from {config.run_dir}.")
 
     Rs = run_data["Rs"]
     density_spacing = 0.1
@@ -65,19 +66,17 @@ def main():
     }
 
     print("Loading test set")
-    dataset = []
-    for dataset_path in config.testsets:
-        dataset += get_iso_permuted_dataset(
-            dataset_path,
-            free_atom_densities,
-            free_density_input=True,
-            Rs=Rs,
-            exclude_elements=config.exclude_elements,
-            include_elements=config.include_elements,
-        )
-    if config.test_samples is None:
-        config.test_samples = len(dataset)
-    test_loader = torch_geometric.data.DataLoader(dataset[: config.test_samples], batch_size=1, shuffle=False)
+    test_loader = get_dataloader(
+        data_path=config.testset,
+        free_atom_densities=free_atom_densities,
+        Rs=Rs,
+        exclude_elements=config.exclude_elements,
+        include_elements=config.include_elements,
+        num_samples=config.test_samples,
+        world_size=1,
+        global_rank=0,
+        shuffle=False,
+    )
 
     eps_cum = 0
     eps_per_l_cum = np.zeros(len(Rs))
