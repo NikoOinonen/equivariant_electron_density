@@ -58,7 +58,7 @@ class TrainConfig(RunConfig):
     test_samples: int
     num_epochs: int
     test_interval: int
-    batch_average: int
+    batch_size: int
     lr: float
     lr_warm: int
     lr_decay: float
@@ -87,12 +87,7 @@ class TrainConfig(RunConfig):
         )
         parser.add_argument("--num_epochs", type=int, default=10, help="Number of epochs to train the model.")
         parser.add_argument("--test_interval", type=int, default=1, help="Number of epochs between test evaluations.")
-        parser.add_argument(
-            "--batch_average",
-            type=int,
-            default=1,
-            help="Number of batches to average over per GPU between gradient steps.",
-        )
+        parser.add_argument("--batch_size", type=int, default=1, help="Number of samples in a batch per GPU.")
         parser.add_argument("--lr", type=float, default=1e-3, help="Base learning rate for optimization.")
         parser.add_argument("--lr_warm", type=int, default=4000, help="Number of steps for learning rate warmup.")
         parser.add_argument("--lr_decay", type=float, default=10000, help="Number of batches for learning rate decay.")
@@ -155,4 +150,3 @@ class TestConfig(RunConfig):
         )
         parser.add_argument("--weights_epoch", type=int, default=None, help="Epoch to load weights from.")
         return parser.parse_args()
-

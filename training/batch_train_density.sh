@@ -36,7 +36,7 @@ torchrun \
         --testset ../generate_density_datasets/data_list_ccsd-cid_test.json \
         --num_epochs 40 \
         --test_interval 1 \
-        --batch_average 2 \
+        --batch_size 2 \
         --lr 1.5e-3 \
         --lr_warm 8000 \
         --lr_decay 350e3 \

@@ -73,9 +73,6 @@ def main():
         exclude_elements=config.exclude_elements,
         include_elements=config.include_elements,
         num_samples=config.test_samples,
-        world_size=1,
-        global_rank=0,
-        shuffle=False,
     )
 
     eps_cum = 0

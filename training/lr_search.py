@@ -37,7 +37,7 @@ if __name__ == "__main__":
     max_l_edges = len(irreps_hidden) - 1
     input_shape = Rs[0][0]
 
-    loss_log_path = Path(f"loss_log_lr_avg{config.batch_average}_{config.irreps_hidden}x{config.num_layers}.csv")
+    loss_log_path = Path(f"loss_log_lr_bs{config.batch_size}_{config.irreps_hidden}x{config.num_layers}.csv")
     with open(loss_log_path, "w") as f:
         f.write("i_batch,lr,loss\n")
 
@@ -80,8 +80,7 @@ if __name__ == "__main__":
         exclude_elements=config.exclude_elements,
         include_elements=config.include_elements,
         num_samples=config.train_samples,
-        world_size=1,
-        global_rank=0,
+        batch_size=config.batch_size
     )
 
     model = MaceNetwork(**model_kwargs)

@@ -248,6 +248,8 @@ class MaceNetwork(torch.nn.Module):
 
 if __name__ == "__main__":
 
+    from torch_geometric.loader import DataLoader
+
     model = MaceNetwork(
         irreps_in="10x0e",
         # irreps_hidden=[(mul, (l, p)) for l, mul in enumerate([125, 40, 25, 15]) for p in [-1, 1]],
@@ -266,9 +268,30 @@ if __name__ == "__main__":
 
     print(sum(p.numel() for p in model.parameters() if p.requires_grad))
 
-    data = {
-        "pos": torch.rand(1, 5),
-        "x": torch.rand(5, 10),
-    }
-    y = model(data)
-    print(y.shape)
+    data = [
+        {
+            "pos": torch.rand(5, 3),
+            "x": torch.rand(5, 10),
+        },
+        {
+            "pos": torch.rand(4, 3),
+            "x": torch.rand(4, 10),
+        },
+    ]
+    ys = []
+    for d in data:
+        y = model(d)
+        print(y.shape)
+        ys.append(y)
+
+    data_ = [Data(pos=d["pos"], x=d["x"]) for d in data]
+    dataloader = DataLoader(data_, batch_size=len(data))
+
+    for d in dataloader:
+        y = model(d)
+        print(d, y.shape)
+
+        for i in range(len(data)):
+            y0 = y[d.batch == i]
+            print((y0 - ys[i]).abs().max(), y0.abs().mean())
+            assert torch.allclose(y0, ys[i], rtol=1e-4, atol=1e-7)

@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -36,11 +36,12 @@ def get_dataloader(
     data_path: Path,
     free_atom_densities: dict[int, Path],
     Rs: list[tuple[int, int]],
-    exclude_elements: list[int],
-    include_elements: list[int],
-    num_samples: int,
-    world_size: int,
-    global_rank: int,
+    exclude_elements: Optional[list[int]] = None,
+    include_elements: Optional[list[int]] = None,
+    batch_size: int = 1,
+    num_samples: Optional[int] = None,
+    world_size: int = 1,
+    global_rank: int = 0,
     shuffle: bool = False,
 ) -> DataLoader:
     
@@ -62,7 +63,7 @@ def get_dataloader(
     chunk = math.floor(num_samples / world_size)
     loader = DataLoader(
         dataset[global_rank * chunk : (global_rank + 1) * chunk],
-        batch_size=1,
+        batch_size=batch_size,
         shuffle=shuffle,
     )
 
@@ -176,6 +177,7 @@ def main():
         Rs=Rs,
         exclude_elements=config.exclude_elements,
         include_elements=config.include_elements,
+        batch_size=config.batch_size,
         num_samples=config.train_samples,
         world_size=config.world_size,
         global_rank=config.global_rank,
@@ -187,6 +189,7 @@ def main():
         Rs=Rs,
         exclude_elements=config.exclude_elements,
         include_elements=config.include_elements,
+        batch_size=config.batch_size,
         num_samples=config.test_samples,
         world_size=config.world_size,
         global_rank=config.global_rank,
@@ -229,7 +232,7 @@ def main():
             print(f"Continuing training using weights from {weights_path}")
 
         epoch_start = int(weights_path.name.split("_")[-1].split(".")[0])
-        i_batch = epoch_start * len(train_loader) // config.batch_average
+        i_batch = epoch_start * len(train_loader)
 
     else:
         epoch_start = 0
@@ -244,7 +247,7 @@ def main():
         if not config.run_dir:
             config.run_dir = Path("runs") / (
                 f"{datetime.now().strftime('%y%m%d-%H%M%S')}"
-                f"_bs{config.world_size * config.batch_average}"
+                f"_bs{config.world_size * config.batch_size}"
                 f"_ns{len(train_loader) * config.world_size}"
                 f"_lr{config.lr:.1e}-{config.lr_warm}-{config.lr_decay:.1e}"
                 f"_irreps{config.irreps_hidden}x{config.num_layers}"
@@ -274,7 +277,8 @@ def main():
     loss_per_channel = np.zeros(len(Rs))
     mae = 0.0
     mue = 0.0
-    print_interval = min(500, len(train_loader) / config.batch_average)
+    # print_interval = min(500, len(train_loader))
+    print_interval = min(50, len(train_loader))
 
     for epoch in range(epoch_start, config.num_epochs):
 
@@ -287,55 +291,53 @@ def main():
 
             mask = torch.where(data.y == 0, torch.zeros_like(data.y), torch.ones_like(data.y)).detach()
             data = data.to(config.local_rank)
+
             y_ml = model(data) * mask.to(config.local_rank)
-            loss = (y_ml - data.y).pow(2).mean() / config.batch_average
+            loss = (y_ml - data.y).pow(2).mean()
             loss.backward()
+
+            optim.step()
+            optim.zero_grad()
+            scheduler.step()
 
             for mul, l in Rs:
                 if l == 0:
                     num_ele = sum(sum(y_ml[:, :mul])).detach()
 
-            mue += num_ele / config.batch_average
-            mae += abs(num_ele) / config.batch_average
-
-            loss_per_channel += lossPerChannel(y_ml, data.y, Rs) / config.batch_average
             loss_cum += loss.detach()
+            loss_per_channel += lossPerChannel(y_ml, data.y, Rs)
+            mae += abs(num_ele)
+            mue += num_ele
 
-            if (step + 1) % config.batch_average == 0 or (step + 1) == len(train_loader):
+            if i_batch % print_interval == 0:
 
-                optim.step()
-                optim.zero_grad()
-                scheduler.step()
+                # Take an average of the loss value across parallel ranks
+                loss_cum = average_across_ranks(loss_cum, config.local_rank, config.world_size)
+                loss_per_channel = average_across_ranks(loss_per_channel, config.local_rank, config.world_size)
+                mae = average_across_ranks(mae, config.local_rank, config.world_size)
+                mue = average_across_ranks(mue, config.local_rank, config.world_size)
 
-                if i_batch % print_interval == 0:
+                if config.global_rank == 0:
 
-                    # Take an average of the loss value across parallel ranks
-                    loss_cum = average_across_ranks(loss_cum, config.local_rank, config.world_size)
-                    loss_per_channel = average_across_ranks(loss_per_channel, config.local_rank, config.world_size)
-                    mae = average_across_ranks(mae, config.local_rank, config.world_size)
-                    mue = average_across_ranks(mue, config.local_rank, config.world_size)
+                    print(f"Epoch {epoch + 1}, Train {step + 1}/{len(train_loader)}")
 
-                    if config.global_rank == 0:
+                    writer.add_scalar("Loss/Train", float(loss_cum) / print_interval, i_batch)
+                    writer.add_scalar("Loss/Train l=0", float(loss_per_channel[0]) / print_interval, i_batch)
+                    writer.add_scalar("Loss/Train l=1", float(loss_per_channel[1]) / print_interval, i_batch)
+                    writer.add_scalar("Loss/Train l=2", float(loss_per_channel[2]) / print_interval, i_batch)
+                    writer.add_scalar("Loss/Train l=3", float(loss_per_channel[3]) / print_interval, i_batch)
+                    writer.add_scalar("Loss/Train l=4", float(loss_per_channel[4]) / print_interval, i_batch)
+                    writer.add_scalar("Metrics/Train_MAE", mae / print_interval, i_batch)
+                    writer.add_scalar("Metrics/Train_MUE", mue / print_interval, i_batch)
+                    writer.add_scalar("Other/Learning rate", scheduler.get_last_lr()[0], i_batch)
+                    writer.flush()
 
-                        print(f"Epoch {epoch + 1}, Train {step + 1}/{len(train_loader)}")
+                loss_cum = 0.0
+                loss_per_channel = np.zeros(len(Rs))
+                mae = 0.0
+                mue = 0.0
 
-                        writer.add_scalar("Loss/Train", float(loss_cum) / print_interval, i_batch)
-                        writer.add_scalar("Loss/Train l=0", float(loss_per_channel[0]) / print_interval, i_batch)
-                        writer.add_scalar("Loss/Train l=1", float(loss_per_channel[1]) / print_interval, i_batch)
-                        writer.add_scalar("Loss/Train l=2", float(loss_per_channel[2]) / print_interval, i_batch)
-                        writer.add_scalar("Loss/Train l=3", float(loss_per_channel[3]) / print_interval, i_batch)
-                        writer.add_scalar("Loss/Train l=4", float(loss_per_channel[4]) / print_interval, i_batch)
-                        writer.add_scalar("Metrics/Train_MAE", mae / print_interval, i_batch)
-                        writer.add_scalar("Metrics/Train_MUE", mue / print_interval, i_batch)
-                        writer.add_scalar("Other/Learning rate", scheduler.get_last_lr()[0], i_batch)
-                        writer.flush()
-
-                    loss_cum = 0.0
-                    loss_per_channel = np.zeros(len(Rs))
-                    mae = 0.0
-                    mue = 0.0
-
-                i_batch += 1
+            i_batch += 1
 
         if config.global_rank == 0:
             print(f"Train time: {time.perf_counter() - t0_train}")
