@@ -3,19 +3,53 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Self
+from typing import Optional, Self
 
 
 @dataclass
 class RunConfig(ABC):
+    run_dir: Path
+    batch_size: int
+    include_elements: Optional[list[int]]
+    exclude_elements: Optional[list[int]]
+    num_proc_test: int
     world_size: int
     global_rank: int
     local_rank: int
 
     @classmethod
     @abstractmethod
-    def get_args(cls):
+    def _add_args(cls, parser: argparse.ArgumentParser):
         pass
+
+    @classmethod
+    def get_args(cls) -> argparse.Namespace:
+        parser = argparse.ArgumentParser()
+        parser.add_argument(
+            "--run_dir",
+            type=Path,
+            help="Directory for training or testing. Created automatically during training if not specified.",
+        )
+        parser.add_argument("--batch_size", type=int, default=1, help="Number of samples in a batch per GPU.")
+        parser.add_argument(
+            "--include_elements",
+            type=int,
+            default=None,
+            nargs="*",
+            help="Only take samples that include at least one of the elements with listed atomic numbers.",
+        )
+        parser.add_argument(
+            "--exclude_elements",
+            type=int,
+            default=None,
+            nargs="*",
+            help="Only take samples that do not include any of the elements with listed atomic numbers.",
+        )
+        parser.add_argument(
+            "--num_proc_test", type=int, default=1, help="Number of parallel processes for computing test statistics."
+        )
+        cls._add_args(parser)
+        return parser.parse_args()
 
     @classmethod
     def from_cmd_args(cls) -> Self:
@@ -50,32 +84,24 @@ class RunConfig(ABC):
 
 @dataclass
 class TrainConfig(RunConfig):
-    run_dir: Path
     base_model: Path
     dataset: Path
     testset: Path
-    train_samples: int
-    test_samples: int
+    train_samples: Optional[int]
+    test_samples: Optional[int]
     num_epochs: int
     test_interval: int
-    batch_size: int
     lr: float
     lr_warm: int
     lr_decay: float
     irreps_hidden: str
     correlation_order: int
     num_layers: int
-    include_elements: list[int]
-    exclude_elements: list[int]
+    finetune_method: str
 
     @classmethod
-    def get_args(cls):
-        parser = argparse.ArgumentParser(description="Train model")
-        parser.add_argument(
-            "--run_dir",
-            type=Path,
-            help="Directory for training or testing. Created automatically during training if not specified.",
-        )
+    def _add_args(cls, parser):
+        parser.description = "Train model"
         parser.add_argument("--base_model", type=Path, help="Directory of model used as starting point for fine tuning")
         parser.add_argument("--dataset", type=Path, help="Path to training dataset")
         parser.add_argument("--testset", type=Path, help="Path to test dataset")
@@ -87,7 +113,6 @@ class TrainConfig(RunConfig):
         )
         parser.add_argument("--num_epochs", type=int, default=10, help="Number of epochs to train the model.")
         parser.add_argument("--test_interval", type=int, default=1, help="Number of epochs between test evaluations.")
-        parser.add_argument("--batch_size", type=int, default=1, help="Number of samples in a batch per GPU.")
         parser.add_argument("--lr", type=float, default=1e-3, help="Base learning rate for optimization.")
         parser.add_argument("--lr_warm", type=int, default=4000, help="Number of steps for learning rate warmup.")
         parser.add_argument("--lr_decay", type=float, default=10000, help="Number of batches for learning rate decay.")
@@ -96,57 +121,21 @@ class TrainConfig(RunConfig):
         )
         parser.add_argument("--correlation_order", type=int, default=3, help="MACE layer correlation order.")
         parser.add_argument("--num_layers", type=int, default=3, help="Number of convolution layer.")
-        parser.add_argument(
-            "--include_elements",
-            type=int,
-            default=None,
-            nargs="*",
-            help="Only take samples that include at least one of the elements with listed atomic numbers.",
-        )
-        parser.add_argument(
-            "--exclude_elements",
-            type=int,
-            default=None,
-            nargs="*",
-            help="Only take samples that do not include any of the elements with listed atomic numbers.",
-        )
-        return parser.parse_args()
+        parser.add_argument("--finetune_method", type=str, default="restart-all", help="Type of finetuning to perform.")
 
 
 @dataclass
 class TestConfig(RunConfig):
-    run_dir: Path
     testset: Path
-    test_samples: int
-    include_elements: list[int]
-    exclude_elements: list[int]
-    weights_epoch: int
+    test_samples: Optional[int]
+    weights_epoch: Optional[int]
 
     @classmethod
-    def get_args(cls):
-        parser = argparse.ArgumentParser(description="Test model")
-        parser.add_argument(
-            "--run_dir",
-            type=Path,
-            help="Directory for training or testing. Created automatically during training if not specified.",
-        )
-        parser.add_argument("--testset", type=Path, nargs="+", help="Path to test dataset")
+    def _add_args(cls, parser):
+        parser.description = "Test model"
+        parser.add_argument("--testset", type=Path, help="Path to test dataset")
         parser.add_argument(
             "--test_samples", type=int, default=None, help="Number of samples to take from the test set."
-        )
-        parser.add_argument(
-            "--include_elements",
-            type=int,
-            default=None,
-            nargs="*",
-            help="Only take samples that include at least one of the elements with listed atomic numbers.",
-        )
-        parser.add_argument(
-            "--exclude_elements",
-            type=int,
-            default=None,
-            nargs="*",
-            help="Only take samples that do not include any of the elements with listed atomic numbers.",
         )
         parser.add_argument("--weights_epoch", type=int, default=None, help="Epoch to load weights from.")
         return parser.parse_args()
