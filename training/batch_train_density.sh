@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=02-00:00:00      # Job time allocation
+#SBATCH --time=03-00:00:00      # Job time allocation
 #SBATCH --gres=gpu:4            # Request GPU(s)
 #SBATCH -p gpu-h100-80g,gpu-a100-80g    # Request specific GPU partitions
 #SBATCH --mem=64G               # Memory
@@ -34,12 +34,13 @@ torchrun \
     train_density.py \
         --dataset ../generate_density_datasets/data_list_ccsd-cid_train.json \
         --testset ../generate_density_datasets/data_list_ccsd-cid_test.json \
-        --num_epochs 40 \
-        --test_interval 1 \
-        --batch_size 2 \
+        --num_epochs 160 \
+        --test_interval 4 \
+        --batch_size 8 \
         --lr 1.5e-3 \
         --lr_warm 8000 \
         --lr_decay 350e3 \
         --irreps_hidden "128-128-128-128" \
         --num_layers 6 \
         --correlation_order 3 \
+        --num_proc_test 2 \

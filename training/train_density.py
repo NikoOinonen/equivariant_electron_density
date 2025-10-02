@@ -1,7 +1,9 @@
 import json
 import math
+import multiprocessing as mp
 import os
 import pickle
+import random
 import subprocess
 import sys
 import time
@@ -20,7 +22,8 @@ from torch_geometric.loader import DataLoader
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import TrainConfig
 from models import MaceNetwork
-from utils import get_iso_permuted_dataset, get_scalar_density_comparisons
+from utils import DensityStatistics, get_iso_permuted_dataset
+
 
 def load_dataset(data_list_path: Path) -> list[dict]:
     with open(data_list_path) as f:
@@ -31,6 +34,7 @@ def load_dataset(data_list_path: Path) -> list[dict]:
             data = pickle.load(f)
         dataset += [data[cid] for cid in cids]
     return dataset
+
 
 def get_dataloader(
     data_path: Path,
@@ -44,8 +48,11 @@ def get_dataloader(
     global_rank: int = 0,
     shuffle: bool = False,
 ) -> DataLoader:
-    
+
     dataset = load_dataset(data_path)
+    if shuffle:
+        random.shuffle(dataset)
+
     dataset = get_iso_permuted_dataset(
         dataset,
         free_atom_densities,
@@ -53,14 +60,10 @@ def get_dataloader(
         Rs=Rs,
         exclude_elements=exclude_elements,
         include_elements=include_elements,
+        max_samples=num_samples,
     )
 
-    if num_samples is None:
-        num_samples = len(dataset)
-    elif num_samples > len(dataset):
-        raise ValueError("Split is too large for the dataset.")
-
-    chunk = math.floor(num_samples / world_size)
+    chunk = math.floor(len(dataset) / world_size)
     loader = DataLoader(
         dataset[global_rank * chunk : (global_rank + 1) * chunk],
         batch_size=batch_size,
@@ -111,6 +114,7 @@ def main():
     # Initialize the distributed environment.
     dist.init_process_group("nccl")
     torch.set_default_dtype(torch.float32)
+    mp.set_start_method("spawn")
 
     config = TrainConfig.from_cmd_args()
 
@@ -245,16 +249,15 @@ def main():
         print(f"Number of parameters:", sum(p.numel() for p in model.parameters() if p.requires_grad))
 
         if not config.run_dir:
+            exc_str = f"_exc{'-'.join(str(e) for e in config.exclude_elements)}" if config.exclude_elements else ""
+            inc_str = f"_inc{'-'.join(str(e) for e in config.include_elements)}" if config.include_elements else ""
             config.run_dir = Path("runs") / (
                 f"{datetime.now().strftime('%y%m%d-%H%M%S')}"
                 f"_bs{config.world_size * config.batch_size}"
-                f"_ns{len(train_loader) * config.world_size}"
+                f"_ns{len(train_loader) * config.world_size * config.batch_size}"
                 f"_lr{config.lr:.1e}-{config.lr_warm}-{config.lr_decay:.1e}"
                 f"_irreps{config.irreps_hidden}x{config.num_layers}"
-                f"_corr{config.correlation_order}"
-                f"_exc{'-'.join(str(e) for e in config.exclude_elements)}"
-                if config.exclude_elements
-                else "" f"_inc{'-'.join(str(e) for e in config.include_elements)}" if config.include_elements else ""
+                f"_corr{config.correlation_order}" + exc_str + inc_str
             )
         writer = SummaryWriter(str(config.run_dir))
 
@@ -273,12 +276,18 @@ def main():
         with open(config.run_dir / "environment.yaml", "w") as f:
             subprocess.run(["conda", "env", "export"], stdout=f)
 
-    loss_cum = 0.0
+    loss_train = 0.0
     loss_per_channel = np.zeros(len(Rs))
-    mae = 0.0
-    mue = 0.0
-    # print_interval = min(500, len(train_loader))
-    print_interval = min(50, len(train_loader))
+    mae_train = 0.0
+    mue_train = 0.0
+    print_interval = min(500, len(train_loader))
+    density_stats = DensityStatistics(
+        Rs=Rs,
+        num_eps_per_l=len(model.module.irreps_out),
+        spacing=density_spacing,
+        buffer=3.0,
+        num_proc=config.num_proc_test,
+    )
 
     for epoch in range(epoch_start, config.num_epochs):
 
@@ -302,40 +311,37 @@ def main():
 
             for mul, l in Rs:
                 if l == 0:
-                    num_ele = sum(sum(y_ml[:, :mul])).detach()
+                    num_ele = torch.mean(y_ml[:, :mul]).detach()
 
-            loss_cum += loss.detach()
+            loss_train += loss.detach()
             loss_per_channel += lossPerChannel(y_ml, data.y, Rs)
-            mae += abs(num_ele)
-            mue += num_ele
+            mae_train += abs(num_ele)
+            mue_train += num_ele
 
             if i_batch % print_interval == 0:
 
                 # Take an average of the loss value across parallel ranks
-                loss_cum = average_across_ranks(loss_cum, config.local_rank, config.world_size)
+                loss_train = average_across_ranks(loss_train, config.local_rank, config.world_size)
                 loss_per_channel = average_across_ranks(loss_per_channel, config.local_rank, config.world_size)
-                mae = average_across_ranks(mae, config.local_rank, config.world_size)
-                mue = average_across_ranks(mue, config.local_rank, config.world_size)
+                mae_train = average_across_ranks(mae_train, config.local_rank, config.world_size)
+                mue_train = average_across_ranks(mue_train, config.local_rank, config.world_size)
 
                 if config.global_rank == 0:
 
                     print(f"Epoch {epoch + 1}, Train {step + 1}/{len(train_loader)}")
 
-                    writer.add_scalar("Loss/Train", float(loss_cum) / print_interval, i_batch)
-                    writer.add_scalar("Loss/Train l=0", float(loss_per_channel[0]) / print_interval, i_batch)
-                    writer.add_scalar("Loss/Train l=1", float(loss_per_channel[1]) / print_interval, i_batch)
-                    writer.add_scalar("Loss/Train l=2", float(loss_per_channel[2]) / print_interval, i_batch)
-                    writer.add_scalar("Loss/Train l=3", float(loss_per_channel[3]) / print_interval, i_batch)
-                    writer.add_scalar("Loss/Train l=4", float(loss_per_channel[4]) / print_interval, i_batch)
-                    writer.add_scalar("Metrics/Train_MAE", mae / print_interval, i_batch)
-                    writer.add_scalar("Metrics/Train_MUE", mue / print_interval, i_batch)
+                    writer.add_scalar("Loss/Train", float(loss_train) / print_interval, i_batch)
+                    for l, loss_ in enumerate(loss_per_channel):
+                        writer.add_scalar(f"Loss/Train l={l}", float(loss_) / print_interval, i_batch)
+                    writer.add_scalar("Metrics/Train_MAE", mae_train / print_interval, i_batch)
+                    writer.add_scalar("Metrics/Train_MUE", mue_train / print_interval, i_batch)
                     writer.add_scalar("Other/Learning rate", scheduler.get_last_lr()[0], i_batch)
                     writer.flush()
 
-                loss_cum = 0.0
+                loss_train = 0.0
                 loss_per_channel = np.zeros(len(Rs))
-                mae = 0.0
-                mue = 0.0
+                mae_train = 0.0
+                mue_train = 0.0
 
             i_batch += 1
 
@@ -350,14 +356,11 @@ def main():
             print(f"Epoch {epoch + 1} Test")
             t0_test = time.perf_counter()
 
+        loss_test = 0.0
+        density_stats.start()
+
         with torch.no_grad():
-            test_loss = 0.0
-            test_mae = 0.0
-            test_mue = 0.0
-            bigIs = 0.0
-            eps = 0.0
-            ep_per_l = np.zeros(len(Rs))
-            ele_diff = 0.0
+
             for step, data in enumerate(test_loader):
 
                 if config.global_rank == 0 and (step + 1) % print_interval == 0:
@@ -367,31 +370,19 @@ def main():
                 y_ml = model(data.to(config.local_rank)) * mask.to(config.local_rank)
                 loss = (y_ml - data.y).pow(2).mean()
 
-                for mul, l in Rs:
-                    if l == 0:
-                        num_ele = torch.mean(y_ml[:, :mul]).detach()
+                loss_test += loss.detach()
+                density_stats.add_batch(data, y_ml)
 
-                test_mue += num_ele
-                test_mae += abs(num_ele)
-                test_loss += loss.detach()
+        loss_test /= len(test_loader)
+        mae_test, mue_test, ele_diff, bigIs, eps, eps_per_l = density_stats.get_results()
 
-                num_ele_target, _, bigI, ep, ep_per_l_ = get_scalar_density_comparisons(
-                    data, y_ml, Rs, spacing=density_spacing, buffer=3.0, ldep=True
-                )
-                ep_per_l += ep_per_l_
-
-                n_ele = np.sum(data.z.cpu().detach().numpy())
-                ele_diff += np.abs(n_ele - num_ele_target)
-                bigIs += bigI
-                eps += ep
-
-        test_loss = average_across_ranks(test_loss, config.local_rank, config.world_size)
-        test_mae = average_across_ranks(test_mae, config.local_rank, config.world_size)
-        test_mue = average_across_ranks(test_mue, config.local_rank, config.world_size)
+        loss_test = average_across_ranks(loss_test, config.local_rank, config.world_size)
+        mae_test = average_across_ranks(mae_test, config.local_rank, config.world_size)
+        mue_test = average_across_ranks(mue_test, config.local_rank, config.world_size)
+        ele_diff = average_across_ranks(ele_diff, config.local_rank, config.world_size)
         bigIs = average_across_ranks(bigIs, config.local_rank, config.world_size)
         eps = average_across_ranks(eps, config.local_rank, config.world_size)
-        ep_per_l = average_across_ranks(ep_per_l, config.local_rank, config.world_size)
-        ele_diff = average_across_ranks(ele_diff, config.local_rank, config.world_size)
+        eps_per_l = average_across_ranks(eps_per_l, config.local_rank, config.world_size)
 
         if config.global_rank == 0:
 
@@ -413,18 +404,14 @@ def main():
             )
             print(f"Saved optimizer state on epoch {epoch + 1} to {save_path}.")
 
-            # eps per l and loss per l hard coded for def2 below
-            writer.add_scalar("Loss/Test", float(test_loss) / len(test_loader), i_batch)
-            writer.add_scalar("Metrics/Test_MAE", test_mae / len(test_loader), i_batch)
-            writer.add_scalar("Metrics/Test_MUE", test_mue / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_Electron_Difference", ele_diff / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_big_I", bigIs / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_Epsilon", eps / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_Epsilon l=0", ep_per_l[0] / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_Epsilon l=1", ep_per_l[1] / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_Epsilon l=2", ep_per_l[2] / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_Epsilon l=3", ep_per_l[3] / len(test_loader), i_batch)
-            writer.add_scalar("Other/Test_Epsilon l=4", ep_per_l[4] / len(test_loader), i_batch)
+            writer.add_scalar("Loss/Test", loss_test, i_batch)
+            writer.add_scalar("Metrics/Test_MAE", mae_test, i_batch)
+            writer.add_scalar("Metrics/Test_MUE", mue_test, i_batch)
+            writer.add_scalar("Other/Test_Electron_Difference", ele_diff, i_batch)
+            writer.add_scalar("Other/Test_big_I", bigIs, i_batch)
+            writer.add_scalar("Other/Test_Epsilon", eps, i_batch)
+            for l, ep in enumerate(eps_per_l):
+                writer.add_scalar(f"Other/Test_Epsilon l={l}", ep, i_batch)
             writer.add_scalar("Other/Epoch", epoch + 1, i_batch)
             writer.flush()
 

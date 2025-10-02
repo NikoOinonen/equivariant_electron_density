@@ -1,6 +1,8 @@
 import json
+import multiprocessing as mp
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -12,10 +14,12 @@ from models import MaceNetwork
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils import get_scalar_density_comparisons
+from utils import DensityStatistics
 
 
 def main():
+
+    mp.set_start_method("spawn")
 
     config = TestConfig.from_cmd_args()
     with open(config.run_dir / "run_data.json") as f:
@@ -30,6 +34,7 @@ def main():
 
     Rs = run_data["Rs"]
     density_spacing = 0.1
+    test_start_time = datetime.now().strftime("%y%m%d-%H%M%S")
 
     model = MaceNetwork(**run_data["model_kwargs"])
     model.to(device)
@@ -73,32 +78,54 @@ def main():
         exclude_elements=config.exclude_elements,
         include_elements=config.include_elements,
         num_samples=config.test_samples,
+        batch_size=config.batch_size,
     )
 
-    eps_cum = 0
-    eps_per_l_cum = np.zeros(len(Rs))
+    eps = 0
+    eps_per_l = np.zeros(len(Rs))
+    test_loss = 0.0
+    n_batch = len(test_loader)
+
+    density_stats = DensityStatistics(
+        Rs=Rs,
+        num_eps_per_l=len(model.irreps_out),
+        spacing=density_spacing,
+        buffer=3.0,
+        num_proc=config.num_proc_test,
+    )
+    density_stats.start()
 
     with torch.no_grad():
 
         for step, data in enumerate(test_loader):
 
-            print(f"Sample {step + 1}/{len(test_loader)}")
+            print(f"Sample {step + 1}/{n_batch}")
 
             mask = torch.where(data.y == 0, torch.zeros_like(data.y), torch.ones_like(data.y)).detach()
             y_ml = model(data.to(device)) * mask.to(device)
+            loss = (y_ml - data.y).pow(2).mean()
 
-            _, _, _, eps, eps_per_l = get_scalar_density_comparisons(
-                data, y_ml, Rs, spacing=density_spacing, buffer=3.0, ldep=True
-            )
-            eps_cum += eps
-            eps_per_l_cum += eps_per_l
+            test_loss += loss.detach()
+            density_stats.add_batch(data, y_ml)
 
-    print("\nEpsilon:", eps_cum / len(test_loader))
-    print("Epsilon l=0", eps_per_l_cum[0] / len(test_loader))
-    print("Epsilon l=1", eps_per_l_cum[1] / len(test_loader))
-    print("Epsilon l=2", eps_per_l_cum[2] / len(test_loader))
-    print("Epsilon l=3", eps_per_l_cum[3] / len(test_loader))
-    print("Epsilon l=4", eps_per_l_cum[4] / len(test_loader))
+    test_loss /= n_batch
+    _, _, _, _, eps, eps_per_l = density_stats.get_results()
+
+    print(f"\nTest loss: {test_loss}")
+    print(f"Epsilon: {eps}")
+    for l, ep in enumerate(eps_per_l):
+        print(f"Epsilon l={l}: {ep}")
+
+    with open(config.run_dir / f"test_{test_start_time}.results", "w") as f:
+        f.write(f"Weights epoch: {config.weights_epoch}\n")
+        f.write(f"Test set: {config.testset}\n")
+        f.write(f"Number of samples: {n_batch}\n")
+        f.write(f"Include elements: {config.include_elements}\n")
+        f.write(f"Exclude elements: {config.exclude_elements}\n")
+        f.write(f"Test loss: {test_loss}\n")
+        f.write(f"Epsilon: {eps}\n")
+        for l, ep in enumerate(eps_per_l):
+            f.write(f"Epsilon l={l}: {ep}\n")
 
 
 if __name__ == "__main__":

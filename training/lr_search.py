@@ -100,30 +100,24 @@ if __name__ == "__main__":
         output = model(data.to(device))
         y_ml = output * mask.to(device)
         err = y_ml - data.y.to(device)
-        loss = err.pow(2).mean() / config.batch_average
-
+        loss = err.pow(2).mean()
         loss.backward()
-        losses.append(loss.item())
 
-        if len(losses) == config.batch_average:
+        optim.step()
+        optim.zero_grad()
+        scheduler.step()
 
-            optim.step()
-            optim.zero_grad()
-            scheduler.step()
+        lr = scheduler.get_last_lr()[0]
+        loss = loss.item()
+        print(f"Batch {i_batch}, learning rate: {lr}, loss: {loss}")
 
-            loss = torch.tensor(losses).mean()
-            losses = []
+        # Save loss to file
+        with open(loss_log_path, "a") as f:
+            f.write(f"{i_batch},{lr},{loss}\n")
 
-            lr = scheduler.get_last_lr()[0]
-            print(f"Batch {i_batch}, learning rate: {lr}, loss: {loss}")
+        if i_batch == 0:
+            loss_init = loss
+        elif loss > loss_init * 4:
+            break
 
-            # Save loss to file
-            with open(loss_log_path, "a") as f:
-                f.write(f"{i_batch},{lr},{loss}\n")
-
-            if i_batch == 0:
-                loss_init = loss
-            elif loss > loss_init * 4:
-                break
-
-            i_batch += 1
+        i_batch += 1

@@ -1,12 +1,11 @@
 #!/bin/bash
-#SBATCH --time=00-08:00:00      # Job time allocation
+#SBATCH --time=00-02:00:00      # Job time allocation
 #SBATCH --gres=gpu:1            # Request GPU(s)
 #SBATCH -p gpu-h100-80g,gpu-a100-80g    # Request specific GPU partitions
-#SBATCH --mem=64G               # Memory
-#SBATCH -c 4                    # Number of cores
+#SBATCH --mem=16G               # Memory
+#SBATCH -c 8                    # Number of cores
 #SBATCH -J e3nn_test_density    # Job name
 #SBATCH -o logs/test_%j.log     # Output file
-#SBATCH --exclude dgx[4-7]      # The dgx nodes are somehow slow
 
 # Load modules
 module load mamba
@@ -25,8 +24,8 @@ pip list
 
 # Run script
 python -u test_density.py \
-    --dataset ../generate_density_datasets/dataset_val.pickle ../generate_density_datasets/dataset_train.pickle \
-    --run_dir "runs/Oct28_20-29-16_gpu11.int.triton.aalto.fi_gpu4_avg2_lr2e-2_warmup4000_decay10000_irreps125-40-25-15x7_density_input_exclude15" \
-    --include_elements "15"
-
-    # --dataset ../data/water_density_testset.pkl \
+    --testset ../generate_density_datasets/data_list_ccsd-cid_test.json \
+    --test_samples 1000 \
+    --run_dir "runs/250929-123912_bs32_ns9372_lr1.5e-03-8000-3.5e+05_irreps128-128-128-128x6_corr3" \
+    --num_proc_test 8
+    # --include_elements "15"

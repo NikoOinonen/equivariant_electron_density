@@ -1,7 +1,17 @@
 # +
+import copy
+import math
+import multiprocessing as mp
+import queue
+import time
 from copy import deepcopy
+from multiprocessing.synchronize import Event as EventClass
 from pathlib import Path
 from typing import Optional
+
+import numpy as np
+import torch
+import torch_geometric
 
 
 def flatten_list(nested_list):
@@ -26,6 +36,96 @@ def flatten_list(nested_list):
 # -
 
 
+class DensityStatistics:
+
+    def __init__(
+        self,
+        Rs: list[tuple[int, int]],
+        num_eps_per_l: int = 4,
+        spacing: float = 0.1,
+        buffer: float = 3.0,
+        num_proc: int = 1,
+    ):
+        self.Rs = Rs
+        self.num_eps_per_l = num_eps_per_l
+        self.spacing = spacing
+        self.buffer = buffer
+        self.num_proc = num_proc
+        self._started = False
+
+    def start(self):
+        self._started = True
+        self._stop_event = mp.Event()
+        self._queue = mp.Queue(maxsize=self.num_proc)
+        manager = mp.Manager()
+        self._eps = manager.list()
+        self._eps_per_l = manager.list([manager.list() for _ in range(self.num_eps_per_l)])
+        self._mae = manager.list()
+        self._mue = manager.list()
+        self._ele_diff = manager.list()
+        self._bigIs = manager.list()
+        self._worker_stop_events: list[EventClass] = []
+        for i in range(self.num_proc):
+            worker_stop_event = mp.Event()
+            p = mp.Process(target=self._worker, args=(i, worker_stop_event))
+            p.start()
+            self._worker_stop_events.append(worker_stop_event)
+
+    def add_batch(self, batch: torch_geometric.data.Batch, y_ml: torch.Tensor):
+        if not self._started:
+            raise RuntimeError("Start workers first using `start()`")
+        for i, data in enumerate(batch.to_data_list()):
+            self._queue.put((data, y_ml[batch.batch == i]))
+
+    def get_results(self) -> tuple[float, float, float, float, float, np.ndarray]:
+        if not self._started:
+            raise RuntimeError("Start workers first using `start()`")
+        self._stop_event.set()
+        for event in self._worker_stop_events:
+            event.wait()
+        self.started = False
+        mae = np.mean(self._mae)
+        mue = np.mean(self._mue)
+        ele_diff = np.mean(self._ele_diff)
+        bigIs = np.mean(self._bigIs)
+        eps = np.mean(self._eps)
+        eps_per_l = np.mean(self._eps_per_l, axis=1)
+        return mae, mue, ele_diff, bigIs, eps, eps_per_l
+
+    def _compute_stats(
+            self, data: torch_geometric.data.Data, y_ml: torch.Tensor
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        for mul, l in self.Rs:
+            if l == 0:
+                num_ele = torch.mean(y_ml[:, :mul]).detach().cpu().numpy()
+        num_ele_target, _, bigI, epsilon, epsilon_per_l = get_scalar_density_comparisons(
+            data, y_ml, self.Rs, spacing=self.spacing, buffer=self.buffer, ldep=True
+        )
+        n_ele = np.sum(data.z.cpu().detach().numpy())
+        ele_diff = np.abs(n_ele - num_ele_target)
+        return num_ele, bigI, ele_diff, epsilon, epsilon_per_l
+
+    def _worker(self, i_proc: int, stop_event: EventClass):
+        while True:
+            while True:
+                try:
+                    data, y_ml = self._queue.get(block=False)
+                    break
+                except queue.Empty:
+                    if self._stop_event.is_set():
+                        stop_event.set()
+                        return
+                    time.sleep(0.01)
+            num_ele, bigI, ele_diff, epsilon, epsilon_per_l = self._compute_stats(data, y_ml)
+            self._mue.append(num_ele)
+            self._mae.append(abs(num_ele))
+            self._ele_diff.append(ele_diff)
+            self._bigIs.append(bigI)
+            self._eps.append(epsilon)
+            for i, ep in enumerate(epsilon_per_l):
+                self._eps_per_l[i].append(ep)
+
+
 def get_iso_permuted_dataset(
     molecule_data: list[dict],
     free_atom_density_paths: dict[int, Path],
@@ -33,18 +133,21 @@ def get_iso_permuted_dataset(
     Rs: Optional[list[tuple[int, int]]] = None,
     exclude_elements: Optional[list[int]] = None,
     include_elements: Optional[list[int]] = None,
+    max_samples: Optional[int] = None,
 ):
-    import math
-    import torch
-    import torch_geometric
-    import copy
-    import numpy as np
 
     dataset = []
 
-    isos = {atom_type: torch.Tensor(np.loadtxt(path, skiprows=2, usecols=1)) for atom_type, path in free_atom_density_paths.items()}
+    isos = {
+        atom_type: torch.Tensor(np.loadtxt(path, skiprows=2, usecols=1))
+        for atom_type, path in free_atom_density_paths.items()
+    }
 
     for molecule in molecule_data:
+
+        if max_samples is not None and len(dataset) >= max_samples:
+            break
+
         pos = molecule["pos"]
         # z is atomic number- may want to make 1,0
         atom_types = molecule["type"]
@@ -74,7 +177,9 @@ def get_iso_permuted_dataset(
             for rs_target, rs_old in zip(Rs, molecule["rs_max"]):
                 rs_target = rs_target[0] * (2 * rs_target[1] + 1)
                 rs_old = rs_old[0] * (2 * rs_old[1] + 1)
-                assert rs_target >= rs_old, f"Target basis set size ({rs_target}) is smaller than existing basis ({rs_old})"
+                assert (
+                    rs_target >= rs_old
+                ), f"Target basis set size ({rs_target}) is smaller than existing basis ({rs_old})"
                 pad = torch.zeros((n_atoms, rs_target - rs_old))
                 coeffs_new += [coefficients[:, rs_old_cumulative : rs_old_cumulative + rs_old], pad]
                 norms_new += [norms[:, rs_old_cumulative : rs_old_cumulative + rs_old], pad]
@@ -136,12 +241,13 @@ def get_iso_permuted_dataset(
 
 
 def get_iso_dataset(picklefile, **atm_iso):
+    import copy
     import math
     import pickle
+
+    import numpy as np
     import torch
     import torch_geometric
-    import copy
-    import numpy as np
 
     dataset = []
 
@@ -227,12 +333,13 @@ def get_iso_dataset(picklefile, **atm_iso):
 
 def get_iso_permuted_dataset_lpop_scale(picklefile, rs, **atm_iso):
     amberFlag = 0
+    import copy
     import math
     import pickle
+
+    import numpy as np
     import torch
     import torch_geometric
-    import copy
-    import numpy as np
 
     dataset = []
 
@@ -525,8 +632,8 @@ def generate_grid(data, spacing=0.5, buffer=2.0):
 # NOTE: The units of x, y, z here are assumed to be angstrom
 #       I convert to bohr for gau2grid, but the grid remains in angstroms
 def gau2grid_density_kdtree(x, y, z, data, ml_y, rs, ldepb=False):
-    import numpy as np
     import gau2grid as g2g
+    import numpy as np
     from scipy import spatial
 
     # note, this takes x, y and z as flattened arrays
@@ -538,8 +645,12 @@ def gau2grid_density_kdtree(x, y, z, data, ml_y, rs, ldepb=False):
     target_density = np.zeros_like(x)
 
     # l-indexed arrays to dump specific contributions to density
-    ml_density_per_l = np.array([np.zeros_like(x), np.zeros_like(x), np.zeros_like(x), np.zeros_like(x), np.zeros_like(x)])
-    target_density_per_l = np.array([np.zeros_like(x), np.zeros_like(x), np.zeros_like(x), np.zeros_like(x), np.zeros_like(x)])
+    ml_density_per_l = np.array(
+        [np.zeros_like(x), np.zeros_like(x), np.zeros_like(x), np.zeros_like(x), np.zeros_like(x)]
+    )
+    target_density_per_l = np.array(
+        [np.zeros_like(x), np.zeros_like(x), np.zeros_like(x), np.zeros_like(x), np.zeros_like(x)]
+    )
 
     for coords, full_coeffs, iso_coeffs, ml_coeffs, alpha, norm in zip(
         data.pos_orig.cpu().detach().numpy(),
@@ -801,7 +912,9 @@ def get_scalar_density_comparisons(data, y_ml, Rs, spacing=0.5, buffer=2.0, ldep
             ep_per_l[l] = 100 * np.sum(np.abs(ml_density_per_l[l] - target_density_per_l[l])) / np.sum(target_density)
 
     else:
-        target_density, ml_density = gau2grid_density_kdtree(x.flatten(), y.flatten(), z.flatten(), data, y_ml, Rs, ldepb=ldep)
+        target_density, ml_density = gau2grid_density_kdtree(
+            x.flatten(), y.flatten(), z.flatten(), data, y_ml, Rs, ldepb=ldep
+        )
         # target_density, ml_density = gau2grid_density_kdtree_lpop_scale(x.flatten(),y.flatten(),z.flatten(),data,y_ml,Rs,ldepb=ldep)
 
     # density is in e-/bohr**3
@@ -826,8 +939,8 @@ def get_scalar_density_comparisons(data, y_ml, Rs, spacing=0.5, buffer=2.0, ldep
         return num_ele_target, num_ele_ml, bigI, ep
 
 
-from concurrent import futures
 import itertools
+from concurrent import futures
 
 
 def gau2grid_density_parallel(x, y, z, data, ml_y, rs):
@@ -916,11 +1029,10 @@ def get_dens(coords, full_coeffs, delta_coeffs, ml_coeffs, alpha, norm, xyz, rs,
 
 
 def compute_potential_field(xs, ys, zs, data, y_ml, Rs, interatomic=False, intermolecular=False, rad=3.0):
-    import psi4
     import numpy as np
+    import psi4
 
     # xs,ys,zs are the vertices of the isosurface
-
     # define molecule
     coords = data.pos_orig.tolist()
     atomic_nums = data.z.tolist()
@@ -1314,7 +1426,9 @@ def standardize_data(data, means, stds):
                     if stds[x_ind, i_coeff] == 0:
                         data.y[atm_num][i_coeff] = 0
                     else:
-                        data.y[atm_num][i_coeff] = (data.y[atm_num][i_coeff] - means[x_ind, i_coeff]) / stds[x_ind, i_coeff]
+                        data.y[atm_num][i_coeff] = (data.y[atm_num][i_coeff] - means[x_ind, i_coeff]) / stds[
+                            x_ind, i_coeff
+                        ]
 
     return
 
