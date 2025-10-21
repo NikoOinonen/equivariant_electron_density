@@ -3,12 +3,13 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Optional, Self
+from typing import Literal, Optional, Self
 
 
 @dataclass
 class RunConfig(ABC):
     run_dir: Path
+    runs_base_dir: Path
     batch_size: int
     include_elements: Optional[list[int]]
     exclude_elements: Optional[list[int]]
@@ -29,6 +30,12 @@ class RunConfig(ABC):
             "--run_dir",
             type=Path,
             help="Directory for training or testing. Created automatically during training if not specified.",
+        )
+        parser.add_argument(
+            "--runs_base_dir",
+            type=Path,
+            default=Path("runs"),
+            help="Directory where automatically created directory for training dataset is placed.",
         )
         parser.add_argument("--batch_size", type=int, default=1, help="Number of samples in a batch per GPU.")
         parser.add_argument(
@@ -91,9 +98,11 @@ class TrainConfig(RunConfig):
     test_samples: Optional[int]
     num_epochs: int
     test_interval: int
+    lr_scheduler: Literal["warmup-decay", "cosine"]
     lr: float
     lr_warm: int
     lr_decay: float
+    lr_mult: int
     irreps_hidden: str
     correlation_order: int
     num_layers: int
@@ -113,9 +122,21 @@ class TrainConfig(RunConfig):
         )
         parser.add_argument("--num_epochs", type=int, default=10, help="Number of epochs to train the model.")
         parser.add_argument("--test_interval", type=int, default=1, help="Number of epochs between test evaluations.")
+        parser.add_argument(
+            "--lr_scheduler",
+            type=str,
+            default="warmup-decay",
+            help="Type of learning rate scheduler to use. Either 'warmup-decay' or 'cosine'.",
+        )
         parser.add_argument("--lr", type=float, default=1e-3, help="Base learning rate for optimization.")
         parser.add_argument("--lr_warm", type=int, default=4000, help="Number of steps for learning rate warmup.")
-        parser.add_argument("--lr_decay", type=float, default=10000, help="Number of batches for learning rate decay.")
+        parser.add_argument(
+            "--lr_decay",
+            type=float,
+            default=10000,
+            help="Number of batches for learning rate decay or epochs between cosine anneal restarts.",
+        )
+        parser.add_argument("--lr_mult", type=int, default=1, help="Multiplication factor for cosine annealing restart steps.")
         parser.add_argument(
             "--irreps_hidden", type=str, default="128-128-128-128", help="Number of irreps in equivariant layers."
         )

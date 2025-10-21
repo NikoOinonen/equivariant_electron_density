@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
-from torch.optim import Adam, lr_scheduler
+from torch.optim import Adam, Optimizer, lr_scheduler
 from torch.utils.tensorboard import SummaryWriter
 from torch_geometric.loader import DataLoader
 
@@ -93,12 +93,24 @@ def lossPerChannel(y_ml: torch.Tensor, y_target: torch.Tensor, Rs: list[tuple[in
     return loss_perChannel_list
 
 
-def lr_schedule(i_batch: int, lr_init: float = 1e-10, T_warm: int = 1000, T_decay: float = 10000) -> float:
+def lr_warmup_decay(i_batch: int, lr_init: float = 1e-10, T_warm: int = 1000, T_decay: float = 10000) -> float:
     if i_batch <= T_warm:
         lr = lr_init + (1 - lr_init) * (i_batch / T_warm)
     else:
         lr = 1 / (1 + (i_batch - T_warm) / T_decay)
     return lr
+
+
+def get_lr_scheduler(
+    scheduler_type: str, optim: Optimizer, lr_warm: int, lr_decay: float, lr_mult: int, n_batch_per_epoch: int
+) -> lr_scheduler.LRScheduler:
+    if scheduler_type == "warmup-decay":
+        scheduler = lr_scheduler.LambdaLR(optim, lambda nb: lr_warmup_decay(nb, T_warm=lr_warm, T_decay=lr_decay))
+    else:
+        scheduler = lr_scheduler.CosineAnnealingWarmRestarts(
+            optim, T_0=int(lr_decay) * n_batch_per_epoch, T_mult=lr_mult
+        )
+    return scheduler
 
 
 def average_across_ranks(val: Any, device: str | int | torch.device, world_size: int) -> np.ndarray:
@@ -206,7 +218,14 @@ def main():
     optim = Adam(model.parameters(), lr=config.lr)
     optim.zero_grad()
 
-    scheduler = lr_scheduler.LambdaLR(optim, lambda nb: lr_schedule(nb, T_warm=config.lr_warm, T_decay=config.lr_decay))
+    scheduler = get_lr_scheduler(
+        scheduler_type=config.lr_scheduler,
+        optim=optim,
+        lr_warm=config.lr_warm,
+        lr_decay=config.lr_decay,
+        lr_mult=config.lr_mult,
+        n_batch_per_epoch=len(train_loader),
+    )
 
     if config.run_dir:
 
@@ -251,14 +270,20 @@ def main():
         if not config.run_dir:
             exc_str = f"_exc{'-'.join(str(e) for e in config.exclude_elements)}" if config.exclude_elements else ""
             inc_str = f"_inc{'-'.join(str(e) for e in config.include_elements)}" if config.include_elements else ""
-            config.run_dir = Path("runs") / (
+            if config.lr_scheduler == "warmup-decay":
+                lr_str = f"_lr-wd-{config.lr:.1e}-{config.lr_warm}-{config.lr_decay:.1e}"
+            else:
+                lr_str = f"_lr-cos-{config.lr:.1e}-{config.lr_mult}-{config.lr_decay:.1e}"
+            config.run_dir = config.runs_base_dir / (
                 f"{datetime.now().strftime('%y%m%d-%H%M%S')}"
+                f"_db-{config.dataset.stem}"
                 f"_bs{config.world_size * config.batch_size}"
                 f"_ns{len(train_loader) * config.world_size * config.batch_size}"
-                f"_lr{config.lr:.1e}-{config.lr_warm}-{config.lr_decay:.1e}"
-                f"_irreps{config.irreps_hidden}x{config.num_layers}"
+                + lr_str
+                + f"_irreps{config.irreps_hidden}x{config.num_layers}"
                 f"_corr{config.correlation_order}" + exc_str + inc_str
             )
+            config.runs_base_dir.mkdir(exist_ok=True)
         writer = SummaryWriter(str(config.run_dir))
 
         print(f"Saving log to {config.run_dir}")
@@ -374,7 +399,7 @@ def main():
                 density_stats.add_batch(data, y_ml)
 
         loss_test /= len(test_loader)
-        mae_test, mue_test, ele_diff, bigIs, eps, eps_per_l = density_stats.get_results()
+        mae_test, mue_test, ele_diff, bigIs, eps, eps_per_l = density_stats.get_results_mean()
 
         loss_test = average_across_ranks(loss_test, config.local_rank, config.world_size)
         mae_test = average_across_ranks(mae_test, config.local_rank, config.world_size)

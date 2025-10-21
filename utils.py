@@ -52,9 +52,11 @@ class DensityStatistics:
         self.buffer = buffer
         self.num_proc = num_proc
         self._started = False
+        self._done = False
 
     def start(self):
         self._started = True
+        self._done = False
         self._stop_event = mp.Event()
         self._queue = mp.Queue(maxsize=self.num_proc)
         manager = mp.Manager()
@@ -76,20 +78,36 @@ class DensityStatistics:
             raise RuntimeError("Start workers first using `start()`")
         for i, data in enumerate(batch.to_data_list()):
             self._queue.put((data, y_ml[batch.batch == i]))
-
-    def get_results(self) -> tuple[float, float, float, float, float, np.ndarray]:
+    
+    def _wait_for_workers(self):
         if not self._started:
             raise RuntimeError("Start workers first using `start()`")
         self._stop_event.set()
         for event in self._worker_stop_events:
             event.wait()
-        self.started = False
+        self._started = False
+        self._done = True
+
+    def get_results_mean(self) -> tuple[float, float, float, float, float, np.ndarray]:
+        if not self._done:
+            self._wait_for_workers()
         mae = np.mean(self._mae)
         mue = np.mean(self._mue)
         ele_diff = np.mean(self._ele_diff)
         bigIs = np.mean(self._bigIs)
         eps = np.mean(self._eps)
         eps_per_l = np.mean(self._eps_per_l, axis=1)
+        return mae, mue, ele_diff, bigIs, eps, eps_per_l
+
+    def get_results_std(self) -> tuple[float, float, float, float, float, np.ndarray]:
+        if not self._done:
+            self._wait_for_workers()
+        mae = np.std(self._mae)
+        mue = np.std(self._mue)
+        ele_diff = np.std(self._ele_diff)
+        bigIs = np.std(self._bigIs)
+        eps = np.std(self._eps)
+        eps_per_l = np.std(self._eps_per_l, axis=1)
         return mae, mue, ele_diff, bigIs, eps, eps_per_l
 
     def _compute_stats(

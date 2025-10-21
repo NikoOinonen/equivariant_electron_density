@@ -39,7 +39,7 @@ def main():
     model = MaceNetwork(**run_data["model_kwargs"])
     model.to(device)
 
-    if config.weights_epoch:
+    if config.weights_epoch is not None:
         weights_path = config.run_dir / f"model_weights_epoch_{config.weights_epoch}.pt"
         if not weights_path.exists():
             print(f"Weights for epoch {config.weights_epoch} not found in {config.run_dir}.")
@@ -81,9 +81,7 @@ def main():
         batch_size=config.batch_size,
     )
 
-    eps = 0
-    eps_per_l = np.zeros(len(Rs))
-    test_loss = 0.0
+    test_loss = []
     n_batch = len(test_loader)
 
     density_stats = DensityStatistics(
@@ -105,16 +103,22 @@ def main():
             y_ml = model(data.to(device)) * mask.to(device)
             loss = (y_ml - data.y).pow(2).mean()
 
-            test_loss += loss.detach()
+            test_loss.append(loss.detach().item())
             density_stats.add_batch(data, y_ml)
 
-    test_loss /= n_batch
-    _, _, _, _, eps, eps_per_l = density_stats.get_results()
+    test_loss_mean = np.mean(test_loss)
+    test_loss_std = np.std(test_loss)
+    _, _, _, _, eps, eps_per_l = density_stats.get_results_mean()
+    _, _, _, _, eps_std, eps_per_l_std = density_stats.get_results_std()
 
-    print(f"\nTest loss: {test_loss}")
-    print(f"Epsilon: {eps}")
+    print(f"\nTest loss mean: {test_loss_mean}")
+    print(f"Test loss std: {test_loss_std}")
+    print(f"Epsilon mean: {eps}")
+    print(f"Epsilon std: {eps_std}")
     for l, ep in enumerate(eps_per_l):
-        print(f"Epsilon l={l}: {ep}")
+        print(f"Epsilon l={l} mean: {ep}")
+    for l, ep in enumerate(eps_per_l_std):
+        print(f"Epsilon l={l} std: {ep}")
 
     with open(config.run_dir / f"test_{test_start_time}.results", "w") as f:
         f.write(f"Weights epoch: {config.weights_epoch}\n")
@@ -122,10 +126,14 @@ def main():
         f.write(f"Number of samples: {n_batch}\n")
         f.write(f"Include elements: {config.include_elements}\n")
         f.write(f"Exclude elements: {config.exclude_elements}\n")
-        f.write(f"Test loss: {test_loss}\n")
-        f.write(f"Epsilon: {eps}\n")
+        f.write(f"Test loss mean: {test_loss_mean}\n")
+        f.write(f"Test loss std: {test_loss_std}\n")
+        f.write(f"Epsilon mean: {eps}\n")
+        f.write(f"Epsilon std: {eps_std}\n")
         for l, ep in enumerate(eps_per_l):
-            f.write(f"Epsilon l={l}: {ep}\n")
+            f.write(f"Epsilon l={l} mean: {ep}\n")
+        for l, ep in enumerate(eps_per_l_std):
+            f.write(f"Epsilon l={l} std: {ep}\n")
 
 
 if __name__ == "__main__":

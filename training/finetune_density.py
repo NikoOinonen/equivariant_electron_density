@@ -1,4 +1,5 @@
 import json
+import multiprocessing as mp
 import os
 import subprocess
 import sys
@@ -10,13 +11,13 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
-from torch.optim import Adam, lr_scheduler
+from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
 from train_density import (
     average_across_ranks,
     get_dataloader,
+    get_lr_scheduler,
     lossPerChannel,
-    lr_schedule,
 )
 
 from config import TrainConfig
@@ -40,6 +41,7 @@ def main():
     # Initialize the distributed environment.
     dist.init_process_group("nccl")
     torch.set_default_dtype(torch.float32)
+    mp.set_start_method("spawn")
 
     Rs = run_data["Rs"]
     density_spacing = run_data["density_spacing"]
@@ -99,7 +101,14 @@ def main():
     optim = Adam(model.parameters(), lr=config.lr)
     optim.zero_grad()
 
-    scheduler = lr_scheduler.LambdaLR(optim, lambda nb: lr_schedule(nb, T_warm=config.lr_warm, T_decay=config.lr_decay))
+    scheduler = get_lr_scheduler(
+        scheduler_type=config.lr_scheduler,
+        optim=optim,
+        lr_warm=config.lr_warm,
+        lr_decay=config.lr_decay,
+        lr_mult=config.lr_mult,
+        n_batch_per_epoch=len(train_loader),
+    )
 
     weights_paths = list(config.base_model.glob("model_weights_epoch_*.pt"))
     if not weights_paths:
@@ -109,8 +118,8 @@ def main():
     weights_path = weights_paths[-1]
 
     print(f"Using weights from {weights_path}")
-    state = torch.load(weights_path)
-    model.load_state_dict(state)
+    weights_init = torch.load(weights_path)
+    model.load_state_dict(weights_init)
 
     if config.finetune_method == "restart-all":
         # We just retrain all weights starting from the base model. Does not require any action.
@@ -134,10 +143,11 @@ def main():
 
         print(f"Number of parameters:", sum(p.numel() for p in model.parameters() if p.requires_grad))
 
-        config.run_dir = Path("runs_ft") / (
+        config.run_dir = config.runs_base_dir / (
             f"{datetime.now().strftime('%y%m%d-%H%M%S')}"
             f"_base-{config.base_model.name.split('_')[0]}"
             f"_{config.finetune_method}"
+            f"_db-{config.dataset.stem}"
             f"_bs{config.world_size * config.batch_size}"
             f"_ns{len(train_loader) * config.world_size * config.batch_size}"
             f"_lr{config.lr:.1e}-{config.lr_warm}-{config.lr_decay:.1e}"
@@ -158,6 +168,9 @@ def main():
             f.write(json.dumps(run_data, indent=2))
         with open(config.run_dir / "environment.yaml", "w") as f:
             subprocess.run(["conda", "env", "export"], stdout=f)
+
+        # Save initial weights state
+        torch.save(weights_init, config.run_dir / f"model_weights_epoch_0.pt")
 
     loss_train = 0.0
     loss_per_channel = np.zeros(len(Rs))
@@ -258,7 +271,7 @@ def main():
                 density_stats.add_batch(data, y_ml)
 
         loss_test /= len(test_loader)
-        mae_test, mue_test, ele_diff, bigIs, eps, eps_per_l = density_stats.get_results()
+        mae_test, mue_test, ele_diff, bigIs, eps, eps_per_l = density_stats.get_results_mean()
 
         loss_test = average_across_ranks(loss_test, config.local_rank, config.world_size)
         mae_test = average_across_ranks(mae_test, config.local_rank, config.world_size)
