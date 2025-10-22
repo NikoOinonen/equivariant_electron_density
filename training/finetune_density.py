@@ -1,3 +1,4 @@
+from copy import deepcopy
 import json
 import multiprocessing as mp
 import os
@@ -26,11 +27,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models import MaceNetwork
 from utils import DensityStatistics
 
-# TODO:
-# - fine-tune strategies:
-#   - Multi-head
-#   - LORA?
-
 
 def main():
 
@@ -46,6 +42,9 @@ def main():
     Rs = run_data["Rs"]
     density_spacing = run_data["density_spacing"]
     model_kwargs = run_data["model_kwargs"]
+
+    if config.finetune_method == "elora":
+        model_kwargs["r_lora"] = config.elora_rank
 
     print(
         f"Starting on global rank {config.global_rank}, local rank {config.local_rank}. World size {config.world_size}\n",
@@ -98,7 +97,7 @@ def main():
     model = MaceNetwork(**model_kwargs)
     model.to(config.local_rank)
 
-    optim = Adam(model.parameters(), lr=config.lr)
+    optim = Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     optim.zero_grad()
 
     scheduler = get_lr_scheduler(
@@ -119,7 +118,7 @@ def main():
 
     print(f"Using weights from {weights_path}")
     weights_init = torch.load(weights_path)
-    model.load_state_dict(weights_init)
+    model.load_state_dict(weights_init, strict=False)
 
     if config.finetune_method == "restart-all":
         # We just retrain all weights starting from the base model. Does not require any action.
@@ -129,28 +128,36 @@ def main():
         for name, param in model.named_parameters():
             if "readout" not in name:
                 param.requires_grad = False
+    elif config.finetune_method == "elora":
+        # We freeze all weights except the ELoRA weights
+        # Also train "symmetric_contractions" following https://github.com/hyjwpk/ELoRA
+        for name, param in model.named_parameters():
+            if not ("LoRA" in name or ("symmetric_contractions" in name and "weights_max" not in name)):
+                param.requires_grad = False
     else:
         raise ValueError(f"Unknown fine-tuning method {config.finetune_method}")
-
-    print("Fine tuning the following layers:")
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            print(name)
 
     model = DistributedDataParallel(model, device_ids=[config.local_rank])
 
     if config.global_rank == 0:
 
-        print(f"Number of parameters:", sum(p.numel() for p in model.parameters() if p.requires_grad))
+        print("Fine tuning the following layers:")
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                print(name)
 
+        print(f"Number of trainable parameters:", sum(p.numel() for p in model.parameters() if p.requires_grad))
+
+        ft_str = config.finetune_method if config.finetune_method != "elora" else f"ELoRA-r{config.elora_rank}"
+        l2_str = f"_l2-{config.weight_decay:.0e}" if config.weight_decay > 0 else ""
         config.run_dir = config.runs_base_dir / (
             f"{datetime.now().strftime('%y%m%d-%H%M%S')}"
             f"_base-{config.base_model.name.split('_')[0]}"
-            f"_{config.finetune_method}"
+            f"_{ft_str}"
             f"_db-{config.dataset.stem}"
             f"_bs{config.world_size * config.batch_size}"
             f"_ns{len(train_loader) * config.world_size * config.batch_size}"
-            f"_lr{config.lr:.1e}-{config.lr_warm}-{config.lr_decay:.1e}"
+            f"_lr{config.lr:.1e}-{config.lr_warm}-{config.lr_decay:.1e}" + l2_str
         )
         writer = SummaryWriter(str(config.run_dir))
 
@@ -287,7 +294,9 @@ def main():
 
             # Save model
             save_path = config.run_dir / f"model_weights_epoch_{epoch + 1}.pt"
-            torch.save(model.module.state_dict(), save_path)
+            module = deepcopy(model.module)
+            module.merge_LoRA()
+            torch.save(module.state_dict(), save_path)
             print(f"Saved model weights on epoch {epoch + 1} to {save_path}.")
 
             # Save optimizer state

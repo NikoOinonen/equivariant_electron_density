@@ -106,7 +106,9 @@ class TrainConfig(RunConfig):
     irreps_hidden: str
     correlation_order: int
     num_layers: int
-    finetune_method: str
+    finetune_method: Literal["restart-all", "restart-readout", "elora"]
+    elora_rank: int
+    weight_decay: float
 
     @classmethod
     def _add_args(cls, parser):
@@ -143,6 +145,8 @@ class TrainConfig(RunConfig):
         parser.add_argument("--correlation_order", type=int, default=3, help="MACE layer correlation order.")
         parser.add_argument("--num_layers", type=int, default=3, help="Number of convolution layer.")
         parser.add_argument("--finetune_method", type=str, default="restart-all", help="Type of finetuning to perform.")
+        parser.add_argument("--elora_rank", type=int, default=16, help="Rank of ELoRA finetuning weight matrices.")
+        parser.add_argument("--weight_decay", type=float, default=0, help="L2 weight decay coefficient for trainable parameters.")
 
 
 @dataclass

@@ -1,3 +1,3 @@
 [submodule "submodules/mace-layer"]
 	path = submodules/mace-layer
-	url = https://github.com/ACEsuit/mace-layer.git
+	url = https://github.com/NikoOinonen/mace-layer.git

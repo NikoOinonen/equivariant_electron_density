@@ -215,7 +215,7 @@ def main():
     model = MaceNetwork(**model_kwargs)
     model.to(config.local_rank)
 
-    optim = Adam(model.parameters(), lr=config.lr)
+    optim = Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     optim.zero_grad()
 
     scheduler = get_lr_scheduler(
@@ -274,12 +274,14 @@ def main():
                 lr_str = f"_lr-wd-{config.lr:.1e}-{config.lr_warm}-{config.lr_decay:.1e}"
             else:
                 lr_str = f"_lr-cos-{config.lr:.1e}-{config.lr_mult}-{config.lr_decay:.1e}"
+            l2_str = f"_l2-{config.weight_decay:.0e}" if config.weight_decay > 0 else ""
             config.run_dir = config.runs_base_dir / (
                 f"{datetime.now().strftime('%y%m%d-%H%M%S')}"
                 f"_db-{config.dataset.stem}"
                 f"_bs{config.world_size * config.batch_size}"
                 f"_ns{len(train_loader) * config.world_size * config.batch_size}"
                 + lr_str
+                + l2_str
                 + f"_irreps{config.irreps_hidden}x{config.num_layers}"
                 f"_corr{config.correlation_order}" + exc_str + inc_str
             )

@@ -135,5 +135,8 @@ dmypy.json
 *timer.dat
 
 *.pickle
-training/runs
+training/runs*
+training/lr
+**/*.png
+**/*.pkl
 .vscode
