@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=03-00:00:00      # Job time allocation
+#SBATCH --time=02-00:00:00      # Job time allocation
 #SBATCH --gres=gpu:4            # Request GPU(s)
 #SBATCH -p gpu-h100-80g,gpu-a100-80g    # Request specific GPU partitions
 #SBATCH --mem=64G               # Memory
@@ -32,11 +32,12 @@ torchrun \
     --nproc_per_node $num_gpus \
     --max_restarts 0 \
     train_density.py \
-        --dataset ../generate_density_datasets/data_list_ccsd-cid_train.json \
-        --testset ../generate_density_datasets/data_list_ccsd-cid_test.json \
-        --num_epochs 160 \
-        --test_interval 4 \
-        --batch_size 8 \
+        --dataset ../generate_density_datasets/data_lists/pbe-cid_train.json \
+        --testset ../generate_density_datasets/data_lists/pbe-cid_val.json \
+        --num_epochs 80 \
+        --test_interval 2 \
+        --batch_size 4 \
+        --lr_scheduler "warmup-decay" \
         --lr 1.5e-3 \
         --lr_warm 8000 \
         --lr_decay 350e3 \
@@ -44,3 +45,7 @@ torchrun \
         --num_layers 6 \
         --correlation_order 3 \
         --num_proc_test 2 \
+
+        # --lr_scheduler "cosine"
+        # --lr_mult 1 \
+        # --lr_decay 80

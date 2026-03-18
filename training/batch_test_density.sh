@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=00-02:00:00      # Job time allocation
+#SBATCH --time=00-00:30:00      # Job time allocation
 #SBATCH --gres=gpu:1            # Request GPU(s)
 #SBATCH -p gpu-h100-80g,gpu-a100-80g    # Request specific GPU partitions
 #SBATCH --mem=16G               # Memory
@@ -24,8 +24,9 @@ pip list
 
 # Run script
 python -u test_density.py \
-    --testset ../generate_density_datasets/data_list_ccsd-cid_test.json \
-    --test_samples 1000 \
-    --run_dir "runs/250929-123912_bs32_ns9372_lr1.5e-03-8000-3.5e+05_irreps128-128-128-128x6_corr3" \
+    --testset ../generate_density_datasets/data_lists/perturbed_0.10.json \
+    --run_dir "runs/251001-060742_bs16_ns74976_lr1.5e-03-8000-3.5e+05_irreps128-128-128-128x6_corr3" \
     --num_proc_test 8
+    # --test_samples 1000 \
     # --include_elements "15"
+    # --testset ../generate_density_datasets/data_list_ccsd-cid_test.json \

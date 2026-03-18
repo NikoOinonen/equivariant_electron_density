@@ -7,12 +7,10 @@ import numpy as np
 
 if __name__ == "__main__":
 
-    # run_dir = Path(
-    #     "runs_ft_perturbed/251010-214447_base-251001-060742_restart-all_db-perturbed_0.05-0.10_mix_train_bs2_ns1066_lr5.0e-04-8000-3.5e+05"
-    # )
     run_dir = Path(
-        "runs_ft_perturbed/251013-092523_base-251001-060742_restart-all_db-perturbed_0.05_mix_train_bs2_ns600_lr5.0e-04-8000-3.5e+05"
+        "../runs_ft_perturbed/251022-140615_base-251001-060742_ELoRA-r24_db-perturbed_0.05-0.10_mix_train_bs8_ns1072_lr5.0e-04-8000-3.5e+05"
     )
+    outdir = Path("plots")
 
     eps = {}
     for path in run_dir.glob("test*.results"):
@@ -56,7 +54,7 @@ if __name__ == "__main__":
     plt.ylabel("Epsilon error (%)")
     plt.title(f"Train set: {train_set}")
     plt.legend()
-    plt.savefig(f"test_error_perturb_{run_dir.stem.split('_')[0]}.png", dpi=200)
+    plt.savefig(outdir / f"test_error_perturb_{run_dir.stem.split('_')[0]}.png", dpi=200)
     plt.show()
 
     # plt.bar(sigmas, eps, width=0.03)

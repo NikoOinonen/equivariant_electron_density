@@ -36,6 +36,7 @@ def main():
     density_spacing = 0.1
     test_start_time = datetime.now().strftime("%y%m%d-%H%M%S")
 
+    run_data["model_kwargs"]["r_lora"] = None
     model = MaceNetwork(**run_data["model_kwargs"])
     model.to(device)
 

@@ -33,9 +33,6 @@ def flatten_list(nested_list):
             yield sublist
 
 
-# -
-
-
 class DensityStatistics:
 
     def __init__(
@@ -252,6 +249,7 @@ def get_iso_permuted_dataset(
                 iso_c=iso_coefficients.to(torch.float32),
                 exp=exp.to(torch.float32),
                 norm=norms.to(torch.float32),
+                cid=molecule["cid"],
             )
         ]
 

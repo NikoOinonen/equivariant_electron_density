@@ -4,18 +4,21 @@ import numpy as np
 import psi4
 
 
-def load_molecule(xyz_path: Path):
-    with open(xyz_path) as f:
-        molstr = " ".join(f.readlines())
+def load_molecule(mol_dir: Path, dm_type="CCSD"):
+    data = np.load(mol_dir / "data.npz")
+    geom = data["GEOM-B3LYP"]
+    molstr = ""
+    for atom in geom:
+        molstr += f"{int(atom[0])} {atom[1]} {atom[2]} {atom[3]}\n"
     molstr = molstr + "\n symmetry c1 \n no_reorient \n no_com \n"
     mol = psi4.geometry(molstr)
-    return mol
+    density_matrix = 2 * data[f"D-{dm_type}"] # x2 because the saved density matrix only has alpha electrons
+    return mol, density_matrix
 
 
-def fit_density(mol_dir: Path, out_path: Path, fit_basis: str):
+def fit_density(mol_dir: Path, out_path: Path, fit_basis: str, dm_type: str = "CCSD"):
 
-    mol = load_molecule(mol_dir / "GEOM-B3LYP.xyz")
-    density_matrix = 2 * np.load(mol_dir / "D-CCSD.npy") # x2 because the saved density matrix only has alpha electrons
+    mol, density_matrix = load_molecule(mol_dir, dm_type=dm_type)
 
     orbital_basis = psi4.core.BasisSet.build(mol)
     aux_basis = psi4.core.BasisSet.build(mol, "DF_BASIS_SCF", "", "JFIT", fit_basis)
@@ -147,21 +150,27 @@ def fit_density(mol_dir: Path, out_path: Path, fit_basis: str):
 
 if __name__ == "__main__":
 
-    # db_dir = Path("/scratch/work/oinonen1/density_db")
-    db_dir = Path("/mnt/triton/density_db")
-    input_dir = db_dir / "CCSD-CID"
-    out_dir = db_dir / "fitted_densities"
-
-    original_basis = "cc-pvdz"
-    fit_basis = "def2-universal-jfit-decon"
-
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 5:
         print("Not enough arguments")
         sys.exit(1)
 
     # Division over multiple processes
-    n_proc = int(sys.argv[1])
-    i_proc = int(sys.argv[2])
+    sigma = float(sys.argv[1])
+    dm_type = sys.argv[2]
+    n_proc = int(sys.argv[3])
+    i_proc = int(sys.argv[4])
+
+    if sigma > 0:
+        db_dir = Path("/scratch/work/oinonen1/density_db/CCSD-CID-perturbed")
+        input_dir = db_dir / f"perturbed_{sigma:.2f}"
+        out_dir = db_dir / f"fitted_densities_{sigma:.2f}"
+    else:
+        db_dir = Path("/scratch/work/oinonen1/density_db")
+        input_dir = db_dir / "CCSD-CID"
+        out_dir = db_dir / f"fitted_densities_{dm_type}"
+
+    original_basis = "cc-pvdz"
+    fit_basis = "def2-universal-jfit-decon"
 
     print(f"Performing density fit from {original_basis} to {fit_basis} basis set...")
     psi4.core.set_global_option("basis", original_basis)
@@ -177,11 +186,6 @@ if __name__ == "__main__":
     n_mols = len(mol_dirs)
     print("Total number of molecules:", n_mols)
 
-    # cid = 123083
-    # mol_dir = input_dir / f"molecule_{cid}_0"
-    # out_path = Path("test") / "test.dat"
-    # fit_density(mol_dir, out_path, fit_basis)
-
     for i, mol_dir in enumerate(mol_dirs):
 
         cid = mol_dir.name.split('_')[1]
@@ -193,6 +197,6 @@ if __name__ == "__main__":
         print(f"Molecule {i+1} / {n_mols}, CID: {cid}")
 
         try:
-            fit_density(mol_dir, out_path, fit_basis)
+            fit_density(mol_dir, out_path, fit_basis, dm_type)
         except Exception as e:
             print(f"Ran into an error:\n{e}")

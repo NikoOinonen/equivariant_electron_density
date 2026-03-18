@@ -137,6 +137,11 @@ dmypy.json
 *.pickle
 training/runs*
 training/lr
+training/learning_curve
+training/packed_models
+generate_density_datasets/data_lists
+generate_density_datasets/single_atom_densities
+**/logs
 **/*.png
 **/*.pkl
 .vscode

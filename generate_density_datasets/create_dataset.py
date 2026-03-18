@@ -5,6 +5,7 @@ import pickle
 import sys
 from itertools import zip_longest
 from pathlib import Path
+import time
 
 import numpy as np
 import periodictable as pt
@@ -112,7 +113,7 @@ def get_densities(dens_file, elements):
     return newbasis_coeffs, newbasis_exponents, newbasis_norms, Rs_outs
 
 
-def get_coordinates(inputfile):
+def get_coordinates(mol):
     """
     reads in coordinates and atomic number from psi4 input file
 
@@ -122,10 +123,13 @@ def get_coordinates(inputfile):
     -shape [N] list of element symbols
     """
 
-    points = np.loadtxt(inputfile, usecols=range(1, 4))
-    numatoms = len(points)
-    atomic_numbers = np.genfromtxt(inputfile, usecols=0, dtype="str")
-    atomic_numbers = [int(i) for i in atomic_numbers]
+    # points = np.loadtxt(inputfile, usecols=range(1, 4))
+    # numatoms = len(points)
+    # atomic_numbers = np.genfromtxt(inputfile, usecols=0, dtype="str")
+    # atomic_numbers = [int(i) for i in atomic_numbers]
+    atomic_numbers = mol[:, 0]
+    points = mol[:, 1:]
+    numatoms = len(mol)
     elements = [pt.elements[i].symbol for i in atomic_numbers]
     unique_elements = len(np.unique(atomic_numbers))
     onehot = np.zeros((numatoms, unique_elements))
@@ -147,25 +151,30 @@ def get_coordinates(inputfile):
     return points, numatoms, atomic_numbers, elements, weighted_onehot
 
 
-def get_dataset(data_dir, xyzs_dir):
+def get_dataset(densities_dir: Path, data_dir: Path):
 
-    data_dir = Path(data_dir)
-    density_file_paths = data_dir.glob("*.dat")
-    density_file_paths = sorted(density_file_paths)
+    density_file_paths = sorted(densities_dir.glob("*.dat"))
+
+    n_total = len(density_file_paths)
+    t0 = time.perf_counter()
 
     # coeff_by_type_list = []
-    dataset = []
+    dataset = {}
     for i, density_file in enumerate(density_file_paths):
 
-        print(f"({i + 1}/{len(density_file_paths)}) {density_file.name}")
+        dt = time.perf_counter() - t0
+        n_done = i + 1
+        eta = dt / n_done * (n_total - n_done)
+        print(f"({n_done}/{n_total}) {density_file.name}, eta: {eta:.1f}s")
 
         cid = int(density_file.name.split(".dat")[0])
-        xyz_path = xyzs_dir / f"molecule_{cid}_0" / "GEOM-B3LYP.xyz"
+        mol_data = np.load(data_dir / f"molecule_{cid}_0" / "data.npz")
+        mol = mol_data["GEOM-B3LYP"]
 
         # read in xyz file
         # get number of atoms
         # get onehot encoding
-        points, _, atomic_numbers, elements, weighted_onehot = get_coordinates(xyz_path)
+        points, _, atomic_numbers, elements, weighted_onehot = get_coordinates(mol)
 
         # construct one hot encoding
         onehot = weighted_onehot
@@ -213,14 +222,20 @@ def get_dataset(data_dir, xyzs_dir):
             list_counter = 0
             for (mul, l), (max_mul, max_l) in zip(atom, Rs_out_max):
                 n = mul * ((2 * l) + 1)
-                rect_coeffs[i, counter : counter + n] = torch.Tensor(list(flatten_list(coeff_list[list_counter : list_counter + mul])))
-                rect_expos[i, counter : counter + n] = torch.Tensor(list(flatten_list(expo_list[list_counter : list_counter + mul])))
-                rect_norms[i, counter : counter + n] = torch.Tensor(list(flatten_list(norm_list[list_counter : list_counter + mul])))
+                rect_coeffs[i, counter : counter + n] = torch.Tensor(
+                    list(flatten_list(coeff_list[list_counter : list_counter + mul]))
+                )
+                rect_expos[i, counter : counter + n] = torch.Tensor(
+                    list(flatten_list(expo_list[list_counter : list_counter + mul]))
+                )
+                rect_norms[i, counter : counter + n] = torch.Tensor(
+                    list(flatten_list(norm_list[list_counter : list_counter + mul]))
+                )
                 list_counter += mul
                 max_n = max_mul * ((2 * max_l) + 1)
                 counter += max_n
 
-        cluster_dict = {
+        dataset[cid] = {
             "type": torch.Tensor(atomic_numbers),
             "pos": torch.Tensor(points),
             "onehot": torch.Tensor(onehot),
@@ -230,7 +245,6 @@ def get_dataset(data_dir, xyzs_dir):
             "rs_max": Rs_out_max,
             "cid": cid,
         }
-        dataset.append(cluster_dict)
 
     # reset onehot based on whole dataset
     # need list of unique atomic numbers, in ascending order
@@ -239,14 +253,14 @@ def get_dataset(data_dir, xyzs_dir):
     # look up how to get index- np.where
 
     all_anum = []
-    for item in dataset:
+    for item in dataset.values():
         anum = item["type"]
         all_anum.extend(anum)
 
     unique_elements = np.unique(all_anum)
     num_unique_elements = len(unique_elements)
 
-    for item in dataset:
+    for item in dataset.values():
         numatoms = item["pos"].shape[0]
         onehot = np.zeros((numatoms, num_unique_elements))
         for i, num in enumerate(item["type"]):
@@ -257,7 +271,7 @@ def get_dataset(data_dir, xyzs_dir):
 
     # now get Rs_out_max for whole dataset
     all_rs = []
-    for item in dataset:
+    for item in dataset.values():
         rs = item["rs_max"]
         all_rs.append(rs)
 
@@ -278,13 +292,22 @@ def get_dataset(data_dir, xyzs_dir):
 
 if __name__ == "__main__":
 
+    sigma = 0
+    dm_type = "PBE"
     db_dir = Path("/scratch/work/oinonen1/density_db")
-    # db_dir = Path("/mnt/triton/density_db")
-    densities_dir = db_dir / "fitted_densities"
-    xyzs_dir = db_dir / "CCSD-CID"
-    pickle_path = Path("./dataset.pickle")
+    # db_dir = Path("/mnt/triton/density_db/")
 
-    dataset = get_dataset(densities_dir, xyzs_dir)
+    if sigma > 0:
+        db_dir = db_dir / "CCSD-CID-perturbed"
+        densities_dir = db_dir / f"fitted_densities_{sigma:.2f}"
+        data_dir = db_dir / f"perturbed_{sigma:.2f}"
+        pickle_path = Path(f"./perturbed_{sigma:.2f}.pkl")
+    else:
+        densities_dir = db_dir / f"fitted_densities_{dm_type}"
+        data_dir = db_dir / "CCSD-CID"
+        pickle_path = Path(f"./{dm_type.lower()}-cid.pkl")
+
+    dataset = get_dataset(densities_dir, data_dir)
 
     with open(pickle_path, "wb") as f:
         pickle.dump(dataset, f)
